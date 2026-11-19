@@ -211,3 +211,8 @@ TARGET_PLATFORMS = ["头条号", "百家号", "公众号"]
 # 成品预览里显示的署名
 # 改这一个值即可换署名；也可在 .env 里写 SITE_AUTHOR=你的账号名 覆盖（不用改代码）
 SITE_AUTHOR = os.getenv("SITE_AUTHOR", "Plan B 的AI笔记")
+
+# ---- 富文本增强 ----
+# 给裸文本加 <span leaf=""> 包裹：多一层保险，避免公众号对裸文本的样式继承出错。
+# 默认关闭——当前输出已经实测能正常粘贴，先开校验观察一段时间，需要时再开这个。
+WECHAT_LEAF_WRAP = os.getenv("WECHAT_LEAF_WRAP", "0") == "1"

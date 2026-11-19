@@ -144,9 +144,21 @@ def index() -> str:
         queue = [item for item in queue if item["status"] == status]
 
     counts = compute_stats(load_queue())
+
+    # 排版校验：把「粘到公众号会不会掉格式」提前算出来，显示在卡片上。
+    # 查两层——转换产物（防转换器出 bug）+ 原始正文（防外部样式被静默丢弃）。
+    # 只加在渲染用的副本里，不回写队列，避免数据污染。
+    articles = []
+    for item in queue:
+        row = dict(item)
+        body = item.get("body", "")
+        checks = wechat.validate_source(body) + wechat.validate_html(wechat.to_wechat_html(body))
+        row["fmt"] = wechat.summarize_issues(checks)
+        articles.append(row)
+
     return render_template(
         "review.html",
-        articles=queue,
+        articles=articles,
         counts=counts,
         current=status,
         review_url=config.REVIEW_URL,
@@ -348,10 +360,13 @@ def plain(article_id: str) -> Any:
     # html：带内联样式的富文本，粘到公众号能保留小标题竖线/加粗/列表圆点
     # content：纯文本兜底，给不认格式的平台用
     # 标题单独返回：公众号/头条号/百家号都是标题、正文分开录入，正文里不必重复标题
+    # check：排版校验结果，前端可据此提示「有几处会掉格式」
+    html = wechat.to_wechat_html(article["body"])
     return jsonify({
         "title": article["title"],
         "content": wechat.to_plain_text(article["body"]),
-        "html": wechat.to_wechat_html(article["body"]),
+        "html": html,
+        "check": wechat.summarize_issues(wechat.validate_html(html)),
     })
 
 

@@ -77,6 +77,10 @@
     .src-lib { background:#eef2f7; color:#475569; }
     .mode-ai { background:#e1f5ee; color:#0f766e; }
     .mode-fact { background:#e8f0fe; color:#1d4ed8; }
+    /* 排版校验徽章：OK 绿、提醒黄、会掉格式红 */
+    .fmt-ok { background:#e8f5e9; color:#2e7d32; cursor:help; }
+    .fmt-warn { background:#fff7e0; color:#b45309; cursor:help; }
+    .fmt-err { background:#fdecec; color:#c0392b; cursor:help; font-weight:600; }
     .status { display:inline-block; padding:2px 9px; border-radius:5px; font-size:11px; font-weight:600; }
     .s-pending { background:#faece7; color:var(--warn); }
     .s-approved { background:#e1f5ee; color:var(--ok); }
@@ -233,6 +237,14 @@
       <span class="badge {{ 'mode-ai' if a.mode and 'AI' in a.mode else 'mode-fact' }}">
         {{ a.mode | default('真实素材卡', true) }}
       </span>
+      {% set fmt = a.fmt %}
+      {% if fmt and fmt.errors %}
+      <span class="badge fmt-err" title="{{ fmt.issues | selectattr('level', 'equalto', 'error') | map(attribute='message') | join('｜') }}">排版 {{ fmt.errors }} 处会掉格式</span>
+      {% elif fmt and fmt.warns %}
+      <span class="badge fmt-warn" title="{{ fmt.issues | selectattr('level', 'equalto', 'warn') | map(attribute='message') | join('｜') }}">排版 {{ fmt.warns }} 处提醒</span>
+      {% else %}
+      <span class="badge fmt-ok" title="内联样式完整，粘到公众号不会掉格式">排版 OK</span>
+      {% endif %}
       {% if a.url %}
       <span class="src-line">原文：<a class="source-link" href="{{ a.url }}" target="_blank" rel="noopener">点开核对</a></span>
       {% endif %}
