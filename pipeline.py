@@ -175,10 +175,11 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     国内源优先、且"有真实素材优先"的分层策略：
       1. 全网热榜（百度，带真实摘要）技术话题：约 40%
       2. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）：轮转补齐
-      3. 掘金技术热榜：只有标题，仅在有素材的源不足时兜底 1 条
-      4. 全网热榜里只有标题的条目（头条）：再兜底
-      5. GitHub 热门：境外站不稳，最后兜底
-      6. 备用领域词保底
+      3. DailyHot 聚合源（可选，默认关）：补带摘要的跨平台热榜，约 20%
+      4. 掘金技术热榜：只有标题，仅在有素材的源不足时兜底 1 条
+      5. 全网热榜里只有标题的条目（头条）：再兜底
+      6. GitHub 热门：境外站不稳，最后兜底
+      7. 备用领域词保底
     每条含 {title, desc, url, source, hot}，供审核页展示与 AI 基于事实写作。
     """
     items: list[dict[str, Any]] = []
@@ -205,21 +206,32 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     # 2. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）：轮转补齐
     take(_fetch_rss_items(limit), limit)
 
-    # 3. 掘金技术热榜：只有标题无摘要，仅在有素材的源不够时兜底 1 条
+    # 3. DailyHot 聚合源（默认关闭，需在 .env 写 USE_DAILYHOT=1）：
+    #    补一批带摘要的跨平台热榜，只取相关分 > 0 的，配额 20%
+    if len(items) < limit and getattr(config, "USE_DAILYHOT", False):
+        daily = [
+            x for x in hot_topics.fetch_dailyhot(max(limit, 6))
+            if (x.get("desc") or "").strip()
+            and hot_topics.relevance_score(x["title"]) > 0
+        ]
+        daily.sort(key=lambda x: hot_topics.relevance_score(x["title"]), reverse=True)
+        take(daily, max(1, round(limit * 0.2)))
+
+    # 4. 掘金技术热榜：只有标题无摘要，仅在有素材的源不够时兜底 1 条
     if len(items) < limit and getattr(config, "USE_JUEJIN_TOPICS", True):
         juejin_items = hot_topics.fetch_juejin(max(3, limit))
         juejin_items.sort(key=lambda x: hot_topics.relevance_score(x["title"]), reverse=True)
         take(juejin_items, 1)
 
-    # 4. 全网热榜里只有标题的条目（如头条）：再兜底
+    # 5. 全网热榜里只有标题的条目（如头条）：再兜底
     if len(items) < limit:
         take(hot_topics.collect(max(limit * 2, 6), require_desc=False), 1)
 
-    # 5. GitHub 热门：境外站不稳，最后兜底 1 条
+    # 6. GitHub 热门：境外站不稳，最后兜底 1 条
     if len(items) < limit and getattr(config, "USE_GITHUB_TOPICS", True):
         take(hot_topics.fetch_github(max(2, limit)), 1)
 
-    # 6. 备用领域词保底
+    # 7. 备用领域词保底
     if len(items) < limit:
         take(
             [{"title": t, "source": "领域词库", "hot": 0} for t in config.FALLBACK_TOPICS],

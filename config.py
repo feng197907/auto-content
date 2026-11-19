@@ -169,6 +169,28 @@ USE_JUEJIN_TOPICS = True
 # 境外站点，服务器实测时通时不通，故只在国内源都不够时补位，不再优先。
 USE_GITHUB_TOPICS = True
 
+# ---- DailyHotApi 聚合源（可选，默认关闭）----
+# 自部署项目（imsyy/DailyHotApi），一个接口拿多平台热榜，省掉逐站适配。
+# 但公共实例常年不稳定：2026-11-19 实测 api-hot.imsyy.top 与本机代理均不可达，
+# 所以默认关闭，代码就绪但等验证通过再开。
+# 启用步骤：
+#   1. 在服务器上跑 `python hot_topics.py --check dailyhot` 看能不能通
+#   2. 通了就在 .env 里写 USE_DAILYHOT=1（或自建实例改 DAILYHOT_BASES）
+USE_DAILYHOT = os.getenv("USE_DAILYHOT", "0") == "1"
+
+# 多实例按顺序尝试，第一个能通的就用（自建实例填自己的地址）
+DAILYHOT_BASES = [
+    b.strip()
+    for b in os.getenv(
+        "DAILYHOT_BASES",
+        "https://api-hot.imsyy.top",
+    ).split(",")
+    if b.strip()
+]
+
+# 要拉的平台（对应 DailyHotApi 的路由名）
+DAILYHOT_PLATFORMS = ["zhihu", "weibo", "36kr", "juejin"]
+
 # 备用选题关键词：热榜抓不到相关话题时，用这些让 AI 自己出题
 FALLBACK_TOPICS: list[str] = [
     "普通用户现在最值得用的 AI 工具有哪些",

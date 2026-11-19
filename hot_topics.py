@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -250,3 +251,179 @@ def collect(limit: int, require_desc: bool = True) -> list[dict[str, Any]]:
 
     scored.sort(key=lambda x: (x["score"], x["hot"]), reverse=True)
     return scored[:limit]
+
+
+# ---------------------------------------------------------------------------
+# DailyHotApi 聚合源（可选）
+#
+# 用一个第三方实例统一拿多平台热榜，省掉逐站适配。但它是自部署项目，公共实例
+# 常年不稳定，所以这里做成：默认关闭 + 多实例回退 + 字段宽容解析。
+# 想启用：先跑 `python hot_topics.py --check dailyhot` 确认能通，
+# 再在 .env 里写 USE_DAILYHOT=1（或改 config.USE_DAILYHOT）。
+# ---------------------------------------------------------------------------
+
+def _pick(raw: dict[str, Any], *keys: str) -> str:
+    """从条目里按候选键名取第一个非空值——不同实例字段名有出入。"""
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)) and value:
+            return str(value)
+    return ""
+
+
+def fetch_dailyhot(limit: int = 10, timeout: int = 8) -> list[dict[str, Any]]:
+    """从 DailyHotApi 拉多平台热榜，失败返回空列表（不抛异常）。"""
+    bases = [b.rstrip("/") for b in getattr(config, "DAILYHOT_BASES", []) if b]
+    if not bases:
+        return []
+
+    platforms = getattr(config, "DAILYHOT_PLATFORMS", [])
+    result: list[dict[str, Any]] = []
+    used_base = ""
+
+    for base in bases:
+        try:
+            probe = requests.get(f"{base}/{platforms[0]}", headers=HEADERS, timeout=timeout)
+            if probe.status_code == 200 and probe.json().get("data") is not None:
+                used_base = base
+                break
+        except Exception:
+            continue
+    if not used_base:
+        return []
+
+    for platform in platforms:
+        try:
+            resp = requests.get(f"{used_base}/{platform}", headers=HEADERS, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+        except Exception:
+            continue
+
+        for raw in (payload.get("data") or [])[:limit]:
+            title = _pick(raw, "title", "name", "word", "query")
+            if not title:
+                continue
+            url = _pick(raw, "url", "mobileUrl", "link", "href")
+            hot_raw = _pick(raw, "hot", "hotValue", "hot_score", "score")
+            hot = int(re.sub(r"\D", "", hot_raw) or 0) if hot_raw else 0
+            result.append({
+                "title": title,
+                "desc": _pick(raw, "desc", "description", "summary", "content"),
+                "url": url,
+                "hot": hot,
+                "source": f"DailyHot·{platform}",
+            })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 源健康检查：哪个源挂了，一条命令就能看见
+#
+# 以前是「到点没生成出稿子」才发现源失效，得逐个手测。
+# 现在把探测独立出来，跑一次就知道每个源的状态、条数、耗时，
+# 也能放进每日任务里，源失效时直接告警。
+# ---------------------------------------------------------------------------
+
+def source_health(timeout: int = 10) -> list[dict[str, Any]]:
+    """逐个探测选题源，返回每个源的状态。"""
+    checks: list[tuple[str, Any]] = [
+        ("头条热榜", lambda: fetch_toutiao(timeout)),
+        ("百度热搜", lambda: fetch_baidu(timeout)),
+        ("掘金热榜", lambda: fetch_juejin(5, timeout)),
+        ("GitHub 热门", lambda: fetch_github(5)),
+    ]
+    if getattr(config, "USE_DAILYHOT", False):
+        checks.append(("DailyHot 聚合", lambda: fetch_dailyhot(5, timeout)))
+
+    rows: list[dict[str, Any]] = []
+    for name, fn in checks:
+        started = time.time()
+        try:
+            items = fn()
+            rows.append({
+                "name": name,
+                "ok": bool(items),
+                "count": len(items),
+                "ms": int((time.time() - started) * 1000),
+                "error": "" if items else "返回空列表",
+            })
+        except Exception as exc:  # noqa: BLE001 - 健康检查不能因单源异常中断
+            rows.append({
+                "name": name,
+                "ok": False,
+                "count": 0,
+                "ms": int((time.time() - started) * 1000),
+                "error": str(exc)[:120],
+            })
+
+    # RSS 源：只探状态码和条目数，不解析内容
+    # 注意：有的源给的是 Atom（<feed><entry>），不是 RSS 2.0（<item>），
+    # 只数 <item> 会把博客园这类源误判成挂了，两种都要认。
+    for src in getattr(config, "TOPIC_SOURCES", []):
+        started = time.time()
+        try:
+            resp = requests.get(src["url"], headers=HEADERS, timeout=timeout)
+            count = 0
+            if resp.status_code == 200:
+                count = len(re.findall(r"<item[\s>]|<entry[\s>]", resp.text))
+            rows.append({
+                "name": f"RSS·{src['name']}",
+                "ok": resp.status_code == 200 and count > 0,
+                "count": count,
+                "ms": int((time.time() - started) * 1000),
+                "error": (
+                    f"HTTP {resp.status_code}" if resp.status_code != 200
+                    else ("返回里没有 item/entry，可能被反爬拦截" if count == 0 else "")
+                ),
+            })
+        except Exception as exc:  # noqa: BLE001
+            rows.append({
+                "name": f"RSS·{src['name']}",
+                "ok": False,
+                "count": 0,
+                "ms": int((time.time() - started) * 1000),
+                "error": str(exc)[:120],
+            })
+
+    return rows
+
+
+def print_health(rows: list[dict[str, Any]]) -> None:
+    """把健康检查结果打成对齐的表格。"""
+    if not rows:
+        print("没有启用任何选题源")
+        return
+    ok_count = sum(1 for r in rows if r["ok"])
+    name_width = max(len(r["name"]) for r in rows) + 2
+    print(f"{'源'.ljust(name_width)} {'状态':<6} {'条数':>4} {'耗时':>7}  备注")
+    print("-" * (name_width + 32))
+    for r in rows:
+        status = "OK" if r["ok"] else "FAIL"
+        print(
+            f"{r['name'].ljust(name_width)} {status:<6} {r['count']:>4} "
+            f"{str(r['ms']) + 'ms':>7}  {r['error']}"
+        )
+    print("-" * (name_width + 32))
+    print(f"可用 {ok_count}/{len(rows)} 个源")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--health" in sys.argv:
+        print_health(source_health())
+    elif "--check" in sys.argv and "dailyhot" in sys.argv:
+        rows = fetch_dailyhot(3)
+        if rows:
+            print(f"DailyHot 可用，取到 {len(rows)} 条：")
+            for row in rows:
+                print(f"  [{row['source']}] {row['title'][:40]} | 热度 {row['hot']}")
+        else:
+            print("DailyHot 不可用：所有实例都连不上，或返回结构不符。")
+    else:
+        print("用法：python hot_topics.py --health | --check dailyhot")
