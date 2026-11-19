@@ -553,20 +553,35 @@ def split_long_paragraphs(body: str, limit: int = 120) -> str:
         inner = match.group(1)
         if not inner or visible(inner) <= limit:
             return match.group(0)
-        # 切点不能落在结束标签前面：`<strong>结论。</strong>接正文` 这种，
-        # 从"结论。"后面切会把 </strong> 甩到下一段开头，HTML 就坏了
-        sentences = [s for s in re.split(r"(?<=[。！？])(?!</)", inner) if s]
-        # 标签必须整句闭合，否则拼回去就是坏 HTML（标签跨句时放弃拆分，交给人审）
-        if not all(tags_balanced(s) for s in sentences):
+
+        # 只挑"安全切点"：句末、后面不紧跟结束标签、且切到这里标签栈恰好为空。
+        # 模型常把两句一起加粗（<strong>甲。乙。</strong>），句号在标签内部，
+        # 从那里切会把标签劈成两半——这种位置直接不选，改用段内其他句号切。
+        cuts = [
+            m.end()
+            for m in re.finditer(r"[。！？]", inner)
+            if not inner[m.end():m.end() + 2].startswith("</")
+            and tags_balanced(inner[: m.end()])
+        ]
+        if not cuts:
             return match.group(0)
+
+        units: list[str] = []
+        start = 0
+        for pos in cuts:
+            units.append(inner[start:pos])
+            start = pos
+        if start < len(inner):
+            units.append(inner[start:])
+
         chunks: list[str] = []
         buf = ""
-        for sentence in sentences:
-            if buf and visible(buf + sentence) > limit:
+        for unit in units:
+            if buf and visible(buf + unit) > limit:
                 chunks.append(buf)
-                buf = sentence
+                buf = unit
             else:
-                buf += sentence
+                buf += unit
         if buf:
             chunks.append(buf)
         if len(chunks) <= 1:
@@ -609,6 +624,34 @@ def strip_unsafe_config(body: str, desc: str) -> str:
     return re.sub(r"<pre><code>(.*?)</code></pre>", clean_block, body, flags=re.S)
 
 
+def ensure_bold(body: str) -> str:
+    """给每节首句补上加粗。
+
+    骨架要求"每节第一句加粗"，但模型被限流降级到 glm-4-flash 时经常
+    一个加粗都不写，读者扫下来全是平字。这里只改标记不改文字：
+    把小标题后第一段的首句包进 <strong>，补到 3 处为止。
+    """
+    if body.count("<strong>") >= 3:
+        return body
+
+    def bold_first_sentence(match: "re.Match[str]") -> str:
+        head, para = match.group(1), match.group(2)
+        if "<strong>" in para:
+            return match.group(0)
+        parts = re.split(r"(?<=[。！？])", para, maxsplit=1)
+        if not parts or not parts[0].strip():
+            return match.group(0)
+        rest = parts[1] if len(parts) > 1 else ""
+        return f"{head}<p><strong>{parts[0]}</strong>{rest}</p>"
+
+    return re.sub(
+        r"(<h2>.*?</h2>\s*)<p>(.*?)</p>",
+        bold_first_sentence,
+        body,
+        flags=re.S,
+    )
+
+
 def tidy_spaces(body: str) -> str:
     """删掉中文之间多余的空格。
 
@@ -633,7 +676,7 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
             body_lines = lines[1:]
 
     body = markdown_to_html("\n".join(body_lines))
-    return title, tidy_spaces(split_long_paragraphs(body))
+    return title, tidy_spaces(ensure_bold(split_long_paragraphs(body)))
 
 
 def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
@@ -722,6 +765,16 @@ def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
         if word in tail:
             issues.append(f"结尾用了总结套话「{word}」")
             break
+
+    # 结尾要给人一个能做的动作或一句能回应的提问，温吞收尾最容易被划走
+    action_words = (
+        "检查", "查看", "确认", "升级", "自查", "试试", "看看", "执行",
+        "留言", "评论", "转发", "收藏", "关注", "回复", "问一句",
+    )
+    if paragraphs and "？" not in paragraphs[-1] and not any(
+        word in paragraphs[-1] for word in action_words
+    ):
+        issues.append("结尾没有给出动作或提问")
 
     # 同一句话反复出现：模型常把加粗句单独成段，后面又原样复述一遍
     sentences = [s.strip() for s in re.split(r"[。！？!?]", plain) if len(s.strip()) >= 12]
