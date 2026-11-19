@@ -81,6 +81,9 @@
     .fmt-ok { background:#e8f5e9; color:#2e7d32; cursor:help; }
     .fmt-warn { background:#fff7e0; color:#b45309; cursor:help; }
     .fmt-err { background:#fdecec; color:#c0392b; cursor:help; font-weight:600; }
+    /* 推到草稿箱：绿色，和「保存并通过」区分开 */
+    .act-push { background:#0f766e; color:#fff; border-color:#0f766e; font-weight:600; }
+    .act-push:disabled { background:#cbd5e1; border-color:#cbd5e1; color:#fff; cursor:not-allowed; }
     .status { display:inline-block; padding:2px 9px; border-radius:5px; font-size:11px; font-weight:600; }
     .s-pending { background:#faece7; color:var(--warn); }
     .s-approved { background:#e1f5ee; color:var(--ok); }
@@ -285,6 +288,13 @@
       <button class="ok act-main" onclick="saveAnd('{{ a.id }}','approved')">保存并通过</button>
       {% endif %}
       <button onclick="copyPlain('{{ a.id }}')">复制成品</button>
+      {% if a.status == 'approved' and publish_ready %}
+      {# 推到公众号草稿箱：只建草稿不群发，人还要进后台点发表 #}
+      <button class="act-push" id="push-{{ a.id }}" onclick="pushDraft('{{ a.id }}')"
+              {% if not a.cover %}disabled title="先在上面生成头图，公众号草稿必须带封面"{% endif %}>
+        {{ '再推一次草稿箱' if a.draft_id else '推到草稿箱' }}
+      </button>
+      {% endif %}
       <button class="ghost" onclick="preview('{{ a.id }}')">预览成品</button>
       <button class="ghost" onclick="saveOnly('{{ a.id }}')">仅保存</button>
       {% if a.status == 'approved' %}
@@ -565,8 +575,35 @@ document.querySelectorAll('.cover-acts a.dl').forEach(function (a) {
 });
 
 // 手动换一张 / 首次补生成
-async function genCover(id, btn) {
-  if (!btn) btn = event && event.target;
+/* 推到公众号草稿箱：只建草稿，不群发。重复点会新建一条草稿，所以先确认。 */
+async function pushDraft(id) {
+  const btn = document.getElementById('push-' + id);
+  if (btn && btn.disabled) return;
+  const again = btn && btn.textContent.indexOf('再推') >= 0;
+  const msg = again
+    ? '这篇之前推过一次。再推会在公众号后台新建一条草稿（旧的不会删），确定？'
+    : '把这篇文章推进公众号草稿箱？\n推完去公众号后台「草稿箱」检查排版，再点发表。';
+  if (!confirm(msg)) return;
+
+  const old = btn ? btn.textContent : '推到草稿箱';
+  if (btn) { btn.disabled = true; btn.textContent = '推送中…'; }
+  toast('正在上传封面并创建草稿，约 5 秒');
+  try {
+    const r = await api('/publish/' + id, {});
+    if (r.ok) {
+      toast('已进草稿箱，去公众号后台看看');
+      setTimeout(function () { location.reload(); }, 1200);
+    } else {
+      toast(r.error || '推送失败');
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+  } catch (e) {
+    toast('推送失败：' + e);
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function genCover(id, btn) {  if (!btn) btn = event && event.target;
   const old = btn ? btn.textContent : '换一张';
   if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
   toast('AI 正在画封面，约 10 秒');

@@ -2,6 +2,8 @@
 .env
 .env.*
 *.env
+# 但变量模板要进仓库（里面只有变量名，没有值）
+!.env.example
 
 # 运行期数据（含生成稿件、日志、备份）
 data/queue.json

@@ -238,3 +238,10 @@ SITE_AUTHOR = os.getenv("SITE_AUTHOR", "Plan B 的AI笔记")
 # 给裸文本加 <span leaf=""> 包裹：多一层保险，避免公众号对裸文本的样式继承出错。
 # 默认关闭——当前输出已经实测能正常粘贴，先开校验观察一段时间，需要时再开这个。
 WECHAT_LEAF_WRAP = os.getenv("WECHAT_LEAF_WRAP", "0") == "1"
+
+# ---- 微信公众号草稿箱（可选）----
+# 配了才能用「推到草稿箱」；不配就继续用复制粘贴，不影响其他功能。
+# AppID / AppSecret 在公众号后台「设置与开发 → 基本配置」里。
+# 还要把服务器出口 IP 加到该页面的「IP 白名单」，否则报 40164。
+WECHAT_APPID = os.getenv("WECHAT_APPID", "").strip()
+WECHAT_SECRET = os.getenv("WECHAT_SECRET", "").strip()

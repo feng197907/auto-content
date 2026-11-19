@@ -227,3 +227,32 @@ crontab -l
   - `structure_issues()` 新增「结尾没有给出动作或提问」：结尾段没有问号、也不含检查/查看/确认/升级/试试/看看等动作词就报。
   - 新增 `ensure_bold()`：最终稿加粗不足 3 处时，把小标题后第一段的首句包成 `<strong>`，只改标记不改文字。这是给限流降级（glm-4-flash 一个加粗都不写）兜底。
 - 二次实测：4.7 连续两轮 429，4-flash 产出「标题 25 字 + 6 个小标题 + 设问句 + 编造配置行」，四项被重试与代码层修复逐条挡下，最终残留仅「加粗不足」，由 `ensure_bold` 补齐。
+
+## 二十、本地三项优化（2026-11-19 夜，分支 feat/gzh-polish，未部署）
+- 前提：用户要求先在本地分支跑通，暂不动服务器。分支 `feat/gzh-polish`，main 保持不动。
+
+### 1) 公众号排版校验（wechat.py）
+- 参考 isjiamu/gzh-design-skill：把「粘过去会不会掉格式」从肉眼看改成代码查。
+- `validate_html()` 查转换产物：黑名单标签（style/script/iframe/link/form/input/button/video/audio）、`class` 属性、段落缺内联 style、标签配平、公众号会过滤的 CSS（position/grid/flex/float/z-index）、非 https 图片、空段落。分 error/warn。
+- `validate_source()` 查原始正文：带 `<style>`/`class`/`<div>` 说明是从别处粘来的富文本，转换时原样式会丢或布局变形，提前提示。
+- 接入审核页：卡片 meta 区新增徽章（绿=排版 OK / 黄=有提醒 / 红=N 处会掉格式），悬停看原因；`/plain` 增加 `check` 字段。
+- `wrap_leaf()` 可给裸文本包 `<span leaf="">`，由 `config.WECHAT_LEAF_WRAP` 控制，**默认关闭**——现有粘贴效果已验证正常，先观察再说。
+
+### 2) 选题源健康检查 + DailyHot 可选源（hot_topics.py）
+- 原计划用 DailyHotApi 替换手写抓取，**实测走不通**：公共实例 `api-hot.imsyy.top` 在本机 curl（代理 502 / 直连无出口）与 WebFetch 两条通道均不可达；36kr 全路径返回同一个 25KB 反爬拦截页。故不硬接。
+- 改为两件能落地的：
+  - `source_health()`：逐源探测 4 个热榜接口 + 6 个 RSS，输出状态/条数/耗时/错误。`python hot_topics.py --health`。**实测立刻发现真问题**：检查只数 `<item>`，把 Atom 格式（`<feed><entry>`）的博客园误判成挂了，已修，现 10/10 全通。
+  - `fetch_dailyhot()`：多实例按序回退 + 字段宽容解析（title/name/word、desc/description、url/mobileUrl）、失败返回空列表不抛异常。`config.USE_DAILYHOT` 默认 false；`pipeline.fetch_topic_items` 步骤 3 接入，开启且带摘要时补 20% 配额。验证命令 `python hot_topics.py --check dailyhot`。
+
+### 3) 微信草稿箱发布（publish.py，新增）
+- 解决「最后一步还得手动复制粘贴」。
+- `get_access_token()` 带本地缓存（`data/wechat_token.json`，按 appid 区分，提前 5 分钟过期）；`upload_thumb()` 把头图以 thumb 永久素材上传；`create_draft()` 调 `draft/add`，`json.dumps(ensure_ascii=False)` 否则中文进后台变 \uXXXX。
+- 错误码翻成人话（40001/40013/40164 IP 白名单/48001 未认证/45009 限额等），报错直接说怎么办。
+- `app.py` 新增 `POST /publish/<id>`：未配凭据 400、未通过审核 400、无头图 400，成功回写 `draft_id`/`draft_at`。审核页已通过卡片加绿色「推到草稿箱」按钮，未配凭据不渲染，无头图时禁用。
+- 自检：`python publish.py --check`（凭据 → token → 素材接口权限）。
+- 离线验收 21 项全过（mock 微信接口，不真发请求）：token 缓存、封面上传 type=thumb、body 中文不转义、articles 结构、标题截断、3 个错误码翻译、完整链路、缺封面/缺凭据提示。
+
+### 其他
+- 新增 `.env.example`（只有变量名没有值），`.gitignore` 加 `!.env.example` 例外。
+- 回归 15 项全过：三个列表页 200、排版徽章、plain/preview、正常稿 0 error 且脏 HTML 能检出、选题 5 条、健康检查全通、未配凭据时推送接口与按钮表现正确。
+- **未部署服务器**；分支未合并 main。

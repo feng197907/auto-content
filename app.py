@@ -26,6 +26,7 @@ from flask import (
 import config
 import cover as cover_mod
 import wechat
+import publish as publish_mod
 import notify as notifier
 from pipeline import (
     load_queue,
@@ -162,6 +163,7 @@ def index() -> str:
         counts=counts,
         current=status,
         review_url=config.REVIEW_URL,
+        publish_ready=publish_mod.configured(),
     )
 
 
@@ -331,6 +333,46 @@ def cover_regenerate(article_id: str) -> Any:
     save_queue(queue)
     threading.Thread(target=_cover_worker, args=(article_id,), daemon=True).start()
     return jsonify({"ok": True})
+
+
+@app.route("/publish/<article_id>", methods=["POST"])
+def publish_draft(article_id: str) -> Any:
+    """把稿件推进公众号草稿箱（不直接群发，人还要进后台点发表）。
+
+    前置：.env 配了 WECHAT_APPID/WECHAT_SECRET，后台 IP 白名单加了服务器，
+    这篇已经生成头图。缺哪项就报哪项，不吞错误。
+    """
+    if not publish_mod.configured():
+        return jsonify({
+            "ok": False,
+            "error": "还没配公众号凭据。在 .env 里加 WECHAT_APPID 和 WECHAT_SECRET，"
+                     "并把服务器 IP 加到后台 IP 白名单，然后重启服务",
+        }), 400
+
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+
+    if queue[index].get("status") != "approved":
+        return jsonify({"ok": False, "error": "先审核通过再推草稿箱"}), 400
+
+    try:
+        result = publish_mod.publish_article(queue[index])
+    except publish_mod.PublishError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - 网络等意外不能把页面搞挂
+        return jsonify({"ok": False, "error": f"推送失败：{exc}"}), 500
+
+    # 回写草稿 id，重复点也不会重复创建（前端据此提示"再点会新建一条"）
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index != -1:
+        queue[index]["draft_id"] = result["media_id"]
+        queue[index]["draft_at"] = datetime.now().isoformat(timespec="seconds")
+        save_queue(queue)
+
+    return jsonify({"ok": True, "media_id": result["media_id"], "title": result["title"]})
 
 
 @app.route("/delete", methods=["POST"])
