@@ -87,6 +87,33 @@ def save_queue(queue: list[dict[str, Any]]) -> None:
     )
 
 
+def _smart_summary(raw: str, limit: int = 400) -> str:
+    """压空白并按句挑选摘要，优先保住"含数字/版本号"的句子。
+
+    背景：原来直接 [:300] 硬截断，把"修复版本 1.30.7"这类关键句截掉了，
+    AI 只能写"更新到最新版本"这种废话。含数字的句子几乎都是干货
+    （版本号、CVE 编号、时间、金额、比例），必须留下。
+    """
+    text = re.sub(r"\s+", " ", raw).strip()
+    if len(text) <= limit:
+        return text
+
+    sentences = [s for s in re.split(r"(?<=[。！？!?；;])\s*", text) if s]
+    picked: list[str] = []
+    total = 0
+    for index, sentence in enumerate(sentences):
+        has_number = bool(re.search(r"\d", sentence))
+        if index >= 2 and not has_number:
+            continue
+        if total + len(sentence) > limit and picked:
+            continue
+        picked.append(sentence)
+        total += len(sentence)
+
+    out = "".join(picked).strip()
+    return out or text[:limit]
+
+
 def _fetch_rss_items(limit: int) -> list[dict[str, Any]]:
     """轮转抓配置里的国内 RSS 技术源，带真实摘要和原文链接。
 
@@ -112,7 +139,7 @@ def _fetch_rss_items(limit: int) -> list[dict[str, Any]]:
                 summary = entry.get("summary") or entry.get("description") or ""
                 # 摘要可能是 HTML，剥标签压空白，截断避免过长
                 summary = re.sub(r"<[^>]+>", " ", summary)
-                summary = re.sub(r"\s+", " ", summary).strip()[:300]
+                summary = _smart_summary(summary)
                 pool.append({
                     "title": title,
                     "desc": summary,
@@ -301,14 +328,19 @@ def build_prompt(item: dict[str, Any]) -> str:
         "5. 如果有原文链接，在文末用「信息来源」标注出处\n"
         "6. 素材撑不满时宁可写短，绝不用编造的内容凑字数\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
-        "1. 第一行只写标题，20 字以内，不要加'标题：'字样，不要加任何标记\n"
+        f"{config.TITLE_RULE}\n"
         f"{length_rule}\n"
-        "3. 每个小标题必须用两个井号开头，格式严格为：## 小标题文字\n"
-        "   （例如：## 这事儿有多严重），不要写成 H2、不要写成'一、'、"
-        "不要带尖括号或任何 HTML 标签\n"
-        "4. 分点用'－'开头，一句话一段，段落之间空一行\n"
-        "5. 结尾给一条明确可用的建议即可，不要强行凑成清单\n"
-        "6. 不要写代码块，不要解释你的思路，直接输出标题和正文"
+        "3. 小标题必须用两个井号加一个空格开头，格式严格为：## 小标题文字\n"
+        "   （不要写成 H2、不要写成'一、'、不要带尖括号或任何 HTML 标签）\n"
+        "4. 需要强调的句子用**这样**加粗，每节最多加粗一句，不要通篇加粗\n"
+        "5. 命令、配置片段用三个反引号单独包成代码块，一行一条命令；"
+        "普通叙述不要放代码块\n"
+        "6. 不要写导语说明、不要解释你的思路，直接输出标题和正文\n\n"
+        f"{config.ARTICLE_SKELETON}\n"
+        "自检三问（写完自己过一遍）：\n"
+        "· 标题里有没有具体信息点，让人一眼知道跟自己有关？\n"
+        "· 开头三行之内，读者能不能看出'这事和我有什么干系'？\n"
+        "· 读完有没有一个可以马上做的动作？如果全是'应当重视''要加强'，回去改。"
     )
 
 
@@ -358,10 +390,16 @@ def build_optimize_prompt(article: dict[str, Any]) -> str:
         "2. 开头结论更干脆，中段分点更可执行，结尾行动清单更具体\n"
         "3. 全文 800-1200 字，不要空话套话和营销腔\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
-        "1. 第一行只写标题，20 字以内，不要加'标题：'字样，不要加任何标记\n"
-        "2. 每个小标题用两个井号开头，格式严格为：## 小标题文字\n"
-        "3. 分点用'－'开头，一句话一段，段落之间空一行\n"
-        "4. 不要写代码块，不要解释你的思路，直接输出标题和正文"
+        f"{config.TITLE_RULE}\n"
+        "2. 小标题用两个井号加一个空格开头，格式严格为：## 小标题文字\n"
+        "3. 需要强调的句子用**这样**加粗，每节最多加粗一句\n"
+        "4. 命令、配置片段用三个反引号单独包成代码块，一行一条命令\n"
+        "5. 不要写导语说明、不要解释你的思路，直接输出标题和正文\n\n"
+        f"{config.ARTICLE_SKELETON}\n"
+        "自检三问（写完自己过一遍）：\n"
+        "· 标题里有没有具体信息点，让人一眼知道跟自己有关？\n"
+        "· 开头三行之内，读者能不能看出'这事和我有什么干系'？\n"
+        "· 读完有没有一个可以马上做的动作？如果全是'应当重视''要加强'，回去改。"
     )
 
 
@@ -376,12 +414,19 @@ def strip_title_prefix(text: str) -> str:
 
 
 def markdown_to_html(text: str) -> str:
-    """把 AI 常见的 Markdown 标记转成审核页需要的 HTML 标签。"""
+    """把 AI 常见的 Markdown 标记转成审核页需要的 HTML 标签。
+
+    支持的标记：## 小标题、- 列表、**加粗**、`行内代码`、``` 命令块。
+    加粗和代码必须保留——之前一律剥掉，正文粘到公众号就没有重点句了。
+    """
     import re
+    from html import escape
 
     lines = text.splitlines()
     html_lines: list[str] = []
     in_list = False
+    in_code = False
+    code_lines: list[str] = []
 
     def close_list() -> None:
         nonlocal in_list
@@ -390,15 +435,38 @@ def markdown_to_html(text: str) -> str:
             in_list = False
 
     def clean(text: str) -> str:
-        """去掉加粗/斜体标记和可能残留的尖括号标签。"""
-        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        """行内标记转标签，并去掉可能残留的 h 标签。"""
+        text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
         text = re.sub(r"(?<!\w)[*_](.+?)[*_](?!\w)", r"\1", text)
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
         # AI 偶尔输出 <H2>xxx</H2> 这类字面标签，剥掉标签只留文字
         text = re.sub(r"</?[hH][1-6]>", "", text)
         return text.strip()
 
+    def flush_code() -> None:
+        nonlocal in_code, code_lines
+        if in_code:
+            body = escape("\n".join(code_lines).strip("\n"))
+            html_lines.append(f"<pre><code>{body}</code></pre>")
+            in_code = False
+            code_lines = []
+
     for line in lines:
         stripped = line.strip()
+
+        # 代码围栏：``` 开 / ``` 关（保留内部缩进和换行）
+        if stripped.startswith("```"):
+            if in_code:
+                flush_code()
+            else:
+                close_list()
+                in_code = True
+                code_lines = []
+            continue
+        if in_code:
+            code_lines.append(line.rstrip())
+            continue
+
         if not stripped:
             continue
 
@@ -444,7 +512,112 @@ def markdown_to_html(text: str) -> str:
         html_lines.append(f"<p>{clean(stripped)}</p>")
 
     close_list()
+    flush_code()
     return "\n".join(html_lines)
+
+
+def split_long_paragraphs(body: str, limit: int = 120) -> str:
+    """把超长的纯文本段落按句子拆开，一段只留一件事。
+
+    手机上 17px 字号一行约 21 字，120 字就是五六行，读者看到一大坨字会直接划走。
+    模型经常把三点论证塞成一段，与其反复求它，不如在代码层拆干净。
+
+    只处理标签能在句内配平的段落：含 <strong>/<code> 的段落一旦在标签中间切开，
+    HTML 就坏了，那种交给人审更安全。
+    """
+
+    def visible(text: str) -> int:
+        return len(re.sub(r"<[^>]+>", "", text))
+
+    void_tags = {"br", "img", "hr", "input", "meta", "link", "source"}
+
+    def tags_balanced(text: str) -> bool:
+        """句内标签是否成对。
+
+        只数尖括号个数不够——`<strong>前半句。` 这种句子尖括号也是 1 对 1 相等，
+        实际标签却跨到了下一句，切开就是坏 HTML。所以按标签栈严格校验。
+        """
+        stack: list[str] = []
+        for match in re.finditer(r"</?([a-zA-Z0-9]+)[^>]*>", text):
+            tag = match.group(1).lower()
+            if tag in void_tags:
+                continue
+            if match.group(0).startswith("</"):
+                if not stack or stack.pop() != tag:
+                    return False
+            else:
+                stack.append(tag)
+        return not stack
+
+    def split_one(match: "re.Match[str]") -> str:
+        inner = match.group(1)
+        if not inner or visible(inner) <= limit:
+            return match.group(0)
+        # 切点不能落在结束标签前面：`<strong>结论。</strong>接正文` 这种，
+        # 从"结论。"后面切会把 </strong> 甩到下一段开头，HTML 就坏了
+        sentences = [s for s in re.split(r"(?<=[。！？])(?!</)", inner) if s]
+        # 标签必须整句闭合，否则拼回去就是坏 HTML（标签跨句时放弃拆分，交给人审）
+        if not all(tags_balanced(s) for s in sentences):
+            return match.group(0)
+        chunks: list[str] = []
+        buf = ""
+        for sentence in sentences:
+            if buf and visible(buf + sentence) > limit:
+                chunks.append(buf)
+                buf = sentence
+            else:
+                buf += sentence
+        if buf:
+            chunks.append(buf)
+        if len(chunks) <= 1:
+            return match.group(0)
+        return "".join(f"<p>{chunk}</p>" for chunk in chunks)
+
+    return re.sub(r"<p>(.*?)</p>", split_one, body, flags=re.S)
+
+
+def strip_unsafe_config(body: str, desc: str) -> str:
+    """删掉代码块里素材没给过的配置文件行。
+
+    模型很爱在「怎么缓解」那一节自己贴一行 listen 配置，实测写出过
+    `listen 80 http2;`（HTTP 端口配 HTTP/2，语法本身就是错的）。
+    这种示例比不写更危险——读者照抄可能把服务改挂。正文里的描述性说明
+    （"移除 listen 指令里的 http2 参数"）还在，不影响读者理解。
+
+    命令块（nginx -v、systemctl reload nginx）不带分号或花括号，不受影响。
+    """
+
+    def clean_block(match: "re.Match[str]") -> str:
+        lines = match.group(1).splitlines()
+        kept = [
+            line
+            for line in lines
+            if not (
+                line.strip()
+                and not line.strip().startswith("#")
+                and (";" in line or "{" in line)
+                and line.strip() not in desc
+            )
+        ]
+        # 剥完只剩注释（或原本就全是注释）：没有可执行内容，深色块摆在那儿反而突兀
+        if not any(line.strip() and not line.strip().startswith("#") for line in kept):
+            return ""
+        if len(kept) == len(lines):
+            return match.group(0)
+        return "<pre><code>" + "\n".join(kept) + "</code></pre>"
+
+    return re.sub(r"<pre><code>(.*?)</code></pre>", clean_block, body, flags=re.S)
+
+
+def tidy_spaces(body: str) -> str:
+    """删掉中文之间多余的空格。
+
+    模型常在句号后多打一个半角空格（"处于高危状态。 虽然目前……"），
+    在公众号里会显示成一跳一跳的空隙。只处理两侧都是中文（含中文标点）的空格，
+    数字和英文两侧留空格是需要的，不动。
+    """
+    cjk = r"\u4e00-\u9fff\u3000-\u303f\uff01-\uff60"
+    return re.sub(rf"(?<=[{cjk}])[ \u3000]+(?=[{cjk}])", "", body)
 
 
 def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
@@ -460,7 +633,109 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
             body_lines = lines[1:]
 
     body = markdown_to_html("\n".join(body_lines))
-    return title, body
+    return title, tidy_spaces(split_long_paragraphs(body))
+
+
+def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
+    """检查成稿是否符合结构模板，只报会毁掉可读性的硬伤。
+
+    实测模型会稳定犯这几类毛病：小标题写成"什么情况？""该怎么办？"、凑出五个小节、
+    开头一律"近日，某某公司……"、结尾一律"综上所述"、把 300 字塞成一块、
+    通篇加粗。这里做代码层校验，不合格就让模型带问题清单重写一次，
+    比单纯在提示词里求它守规矩可靠。
+    """
+    issues: list[str] = []
+
+    def strip_tags(text: str) -> str:
+        return re.sub(r"<[^>]+>", "", text)
+
+    # 段落和纯文本各取一份：段落长度、开头结尾都要按段落判断，不能整篇揉成一串
+    paragraphs = [strip_tags(p).strip() for p in re.findall(r"<p>(.*?)</p>", body, re.S)]
+    paragraphs = [p for p in paragraphs if p]
+    plain = strip_tags(body)
+
+    # 标题：过长会在分享卡片被截断，诱导词既降权又掉信任
+    if title:
+        clean_title = strip_tags(title).strip()
+        if len(clean_title) > 22:
+            issues.append(f"标题 {len(clean_title)} 字，超过 22 字会被截断")
+        if any(w in clean_title for w in ("揭秘", "震惊", "速看", "炸裂", "马上删", "惊呆")):
+            issues.append("标题带了诱导词")
+
+    # 小标题：3 个左右，必须是陈述句
+    heads = re.findall(r"<h2>(.*?)</h2>", body)
+    if not heads:
+        issues.append("没有小标题")
+    elif len(heads) > 4:
+        issues.append(f"小标题 {len(heads)} 个，超过 4 个")
+    if any(re.search(r"[？?]\s*$", h) for h in heads):
+        issues.append("小标题用了设问句")
+
+    # 开头钩子：新闻联播体一出现，读者三秒内就划走了
+    if paragraphs:
+        opening = paragraphs[0][:40]
+        for word in ("近日", "据悉", "随着", "在当今", "众所周知"):
+            if word in opening:
+                issues.append(f"开头用了新闻体套话「{word}」")
+                break
+
+    # 段落长度：手机上超过 5 行就是一片黑压压的字
+    long_paragraphs = [p for p in paragraphs if len(p) > 120]
+    if long_paragraphs:
+        issues.append(f"有 {len(long_paragraphs)} 段超过 120 字，手机上会连成一片")
+
+    # 加粗：太少扫不到重点，太多等于没有重点
+    bold_count = body.count("<strong>")
+    need_bold = min(3, len(heads)) if heads else 1
+    if bold_count < need_bold:
+        issues.append("加粗的重点句不足")
+    elif bold_count > 8:
+        issues.append(f"加粗 {bold_count} 处太多，重点被稀释")
+
+    # 代码块里冒出配置文件语法（带分号或大括号），但素材从没给过——这是在教人改配置，
+    # 写错一行就能把服务搞挂，比不写更糟。命令块一般不带分号，所以不会误伤
+    for block in re.findall(r"<pre><code>(.*?)</code></pre>", body, re.S):
+        suspicious = [
+            line.strip()
+            for line in strip_tags(block).splitlines()
+            if line.strip()
+            and not line.strip().startswith("#")
+            and (";" in line or "{" in line)
+            and line.strip() not in desc
+        ]
+        if suspicious:
+            issues.append("代码块里有素材未提供的配置行")
+            break
+
+    # 空话套话
+    empty_phrases = ["及时更新", "引起重视", "加强安全意识", "值得关注", "至关重要"]
+    if sum(1 for phrase in empty_phrases if phrase in body) >= 2:
+        issues.append("空话套话过多")
+
+    # 9.2 分说成"满分"是硬伤，懂行的人一眼就看穿（两轮实测都出现过）
+    if "满分" in plain and "满分" not in desc and "10.0" not in desc:
+        issues.append("把评分说成「满分」，与素材不符")
+
+    # 结尾：总结套话是读者划走的信号
+    tail = plain[-120:]
+    for word in ("综上所述", "希望对你有帮助", "希望对大家有帮助", "希望对大家有所启发"):
+        if word in tail:
+            issues.append(f"结尾用了总结套话「{word}」")
+            break
+
+    # 同一句话反复出现：模型常把加粗句单独成段，后面又原样复述一遍
+    sentences = [s.strip() for s in re.split(r"[。！？!?]", plain) if len(s.strip()) >= 12]
+    if any(sentences.count(s) > 1 for s in sentences):
+        issues.append("有句子被重复复述")
+
+    # 标题里的数字必须能在素材或正文里找到，防止"1000 亿"被写成"100 亿"
+    if title and desc:
+        title_nums = re.findall(r"\d+(?:\.\d+)?", title)
+        material_nums = set(re.findall(r"\d+(?:\.\d+)?", desc + " " + plain))
+        if any(n not in material_nums for n in title_nums):
+            issues.append("标题里的数字与素材对不上")
+
+    return issues
 
 
 def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
@@ -475,7 +750,8 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         body = build_factual_card(topic_item)
         mode = "真实素材卡"
     else:
-        raw = call_ai(build_prompt(topic_item))
+        prompt = build_prompt(topic_item)
+        raw = call_ai(prompt)
         if raw is None:
             # AI 调用失败时，降级到事实卡，绝不退回假套话
             title = topic
@@ -484,6 +760,25 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         else:
             title, body = parse_response(raw, topic)
             mode = "AI 改写"
+
+            # 结构不合格：把问题清单回灌给模型，重写一次（只重试一次，控成本）
+            issues = structure_issues(body, title, desc)
+            if issues:
+                print(f"  结构自检未过：{'、'.join(issues)} → 重写一次")
+                fix_prompt = (
+                    f"{prompt}\n\n"
+                    f"你上一版存在这些问题：{'；'.join(issues)}。\n"
+                    "请严格按上面的结构模板重写全文：小标题必须是陈述句、"
+                    "数量控制在 3 个、每节第一句加粗、去掉空话套话。"
+                )
+                raw2 = call_ai(fix_prompt)
+                if raw2:
+                    title2, body2 = parse_response(raw2, topic)
+                    if len(structure_issues(body2, title2, desc)) < len(issues):
+                        title, body = title2, body2
+
+            # 重试也未必改得掉，最后统一把编造的配置行剥一次
+            body = strip_unsafe_config(body, desc)
 
     return {
         "id": uuid.uuid4().hex[:12],

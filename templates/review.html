@@ -106,6 +106,22 @@
     .toast.show { opacity:1; }
     .empty { text-align:center; color:var(--muted); padding:44px 0; }
 
+    /* ---- 公众号头图 ---- */
+    .cover-box { margin-top:14px; border:1px solid var(--line); border-radius:10px;
+                 padding:10px; background:#fafbfc; }
+    .cover-head { display:flex; justify-content:space-between; align-items:center;
+                  font-size:13px; color:var(--muted); margin-bottom:8px; }
+    .cover-img { width:100%; aspect-ratio:2.35 / 1; object-fit:cover; border-radius:8px;
+                 display:block; background:#eef1f5; }
+    .cover-ph { width:100%; aspect-ratio:2.35 / 1; border-radius:8px; background:#eef1f5;
+                display:flex; align-items:center; justify-content:center;
+                color:var(--muted); font-size:13px; text-align:center; padding:0 16px; }
+    .cover-acts { display:flex; gap:8px; margin-top:8px; }
+    .cover-acts button, .cover-acts a { flex:1; min-height:40px; font-size:14px;
+                display:flex; align-items:center; justify-content:center;
+                border:1px solid var(--line); border-radius:8px; background:#fff;
+                color:#1f2937; text-decoration:none; cursor:pointer; }
+
     /* ---- 弹窗：手机接近全屏 ---- */
     .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:50;
              align-items:flex-end; justify-content:center; }
@@ -128,6 +144,12 @@
     .copy-tip { background:#fff8e6; border:1px solid #f5dfa8; color:#8a6100;
                 padding:10px 12px; border-radius:8px; font-size:13px; margin-bottom:12px; }
     textarea.copybox { min-height:240px; font-size:16px; }
+    div.copybox { min-height:240px; max-height:56vh; overflow:auto; padding:12px;
+                  border:1px solid var(--line); border-radius:8px; background:#fff;
+                  font-size:16px; line-height:1.8; color:#1f2937; }
+    /* 富文本剪贴板用的离屏容器：不能 display:none，否则选不中 */
+    #richHolder { position:fixed; left:-99999px; top:0; width:680px;
+                  background:#fff; color:#1f2937; }
 
     /* ---- 桌面端增强 ---- */
     @media (min-width:641px) {
@@ -218,6 +240,30 @@
     <input class="title" id="title-{{ a.id }}" value="{{ a.title }}" aria-label="标题">
     <div class="field-lbl">正文（可直接修改）</div>
     <textarea id="body-{{ a.id }}" aria-label="正文">{{ a.body }}</textarea>
+
+    {% if a.status == 'approved' %}
+    <div class="cover-box">
+      <div class="cover-head">
+        <span>公众号头图 · 2.35:1（900×383）</span>
+        {% if a.cover %}<span>已生成</span>
+        {% elif a.cover_state == 'generating' %}<span>生成中…</span>
+        {% elif a.cover_state == 'failed' %}<span>上次失败，可重试</span>
+        {% else %}<span>未生成</span>{% endif %}
+      </div>
+      {% if a.cover %}
+      <img class="cover-img" data-src="/cover/{{ a.id }}" alt="公众号头图">
+      {% elif a.cover_state == 'generating' %}
+      <div class="cover-ph">AI 正在画封面，约 10 秒<br>稍等，页面会自动刷新</div>
+      {% else %}
+      <div class="cover-ph">还没有头图，点下面「生成头图」</div>
+      {% endif %}
+      <div class="cover-acts">
+        <button onclick="genCover('{{ a.id }}', this)">{{ '换一张' if a.cover else '生成头图' }}</button>
+        {% if a.cover %}<a class="dl" data-src="/cover/{{ a.id }}" download="头图_{{ a.id }}.jpg">下载头图</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+
     <div class="actions">
       {% if a.status == 'approved' %}
       {# 已通过列表：主按钮改为 AI 优化，基于原素材重写覆盖当前稿件 #}
@@ -259,14 +305,17 @@
       <button onclick="closeCopyModal()">关闭</button>
     </div>
     <div class="modal-body">
-      <div class="copy-tip">长按下方文字 → 全选 → 复制，再到平台粘贴发布。（当前为非加密连接，无法一键复制）</div>
-      <textarea class="copybox" id="copyBox" readonly></textarea>
+      <div class="copy-tip">长按下方排版好的文字 → 全选 → 复制，再到公众号粘贴。这样小标题、加粗、列表都能保留。</div>
+      <div class="copybox" id="copyBox" contenteditable="true"></div>
       <div style="margin-top:12px;display:flex;gap:8px;">
         <button class="primary wide" onclick="retryCopy()">再试一键复制</button>
       </div>
     </div>
   </div>
 </div>
+
+<!-- 富文本剪贴板中转站：复制时把排版好的 HTML 塞进来再整体选中 -->
+<div id="richHolder" contenteditable="true" aria-hidden="true"></div>
 
 <script>
 // 桌面端默认展开工具区，手机端默认收起
@@ -349,8 +398,15 @@ async function saveAnd(id, status) {
   const data = payload(id);
   data.status = status;
   const r = await api('/update', data);
-  toast(r.ok ? '已通过，可以复制发布了' : '操作失败');
-  if (r.ok) setTimeout(() => location.reload(), 600);
+  if (!r.ok) { toast(r.error || '操作失败'); return; }
+  // 首次通过会顺带触发头图生成，等 AI 画完再刷新，避免看到"生成中"空档
+  if (r.cover === 'generating') {
+    toast('已通过，正在生成公众号头图，约 10 秒');
+    setTimeout(() => location.reload(), 11000);
+  } else {
+    toast('已通过，可以复制发布了');
+    setTimeout(() => location.reload(), 600);
+  }
 }
 
 // AI优化：基于原稿真实素材重写，覆盖当前稿件（保持已通过状态）。
@@ -387,10 +443,39 @@ async function del(id) {
   if (r.ok) location.reload();
 }
 
-/* ---- 复制：三重兜底 ----
-   1) Clipboard API（需 HTTPS/localhost）
-   2) execCommand('copy')（HTTP 下多数浏览器可用）
-   3) 弹出可选中文本框，用户长按手动复制（微信内置浏览器保底） */
+/* ---- 复制：一定要带格式 ----
+   公众号编辑器只认内联 style，纯文本粘过去小标题竖线/加粗/列表全丢。
+   所以复制时写的是 text/html 而不是纯文本，三级兜底：
+   1) Clipboard API + ClipboardItem（需 HTTPS/localhost）
+   2) execCommand('copy')：HTML 塞进离屏可编辑容器选中复制（HTTP 下也带格式）
+   3) 弹窗显示排版好的可编辑区，长按手动复制 */
+async function copyRich(html, text) {
+  if (navigator.clipboard && window.isSecureContext && window.ClipboardItem && html) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], {type: 'text/html'}),
+        'text/plain': new Blob([text], {type: 'text/plain'})
+      })]);
+      return true;
+    } catch (e) { /* 权限或浏览器不支持，继续往下走 */ }
+  }
+  const holder = document.getElementById('richHolder');
+  if (holder && html) {
+    holder.innerHTML = html;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(holder);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const ok = document.execCommand('copy');
+      sel.removeAllRanges();
+      if (ok) return true;
+    } catch (e) { /* 继续退到纯文本 */ }
+  }
+  return await tryCopy(text);
+}
+
 async function tryCopy(text) {
   if (navigator.clipboard && window.isSecureContext) {
     try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
@@ -413,29 +498,30 @@ async function tryCopy(text) {
 }
 
 let copyTextCache = '';
+let copyHtmlCache = '';
 async function copyPlain(id) {
   try {
     const res = await fetch(withPwd('/plain/' + id));
     const data = await readJson(res);
     const text = data.content || '';
+    const html = data.html || '';
     if (!text) { toast('内容为空'); return; }
-    const ok = await tryCopy(text);
+    const ok = await copyRich(html, text);
     if (ok) {
-      toast('已复制，去平台粘贴发布');
+      toast('已复制排版好的正文，去公众号粘贴（标题单独填）');
     } else {
-      // 前两种都失败，弹出手动复制框
+      // 前两级都失败，弹出手动复制框（里面是排好版的可编辑区，长按复制同样带格式）
       copyTextCache = text;
-      document.getElementById('copyBox').value = text;
-      document.getElementById('copyModal').classList.add('show');
-      // 尝试自动选中，方便长按
+      copyHtmlCache = html;
       const box = document.getElementById('copyBox');
-      box.focus(); box.setSelectionRange(0, box.value.length);
+      box.innerHTML = html || text;
+      document.getElementById('copyModal').classList.add('show');
     }
   } catch (e) { toast('复制失败：' + e); }
 }
 
 async function retryCopy() {
-  const ok = await tryCopy(copyTextCache);
+  const ok = await copyRich(copyHtmlCache, copyTextCache);
   if (ok) { toast('已复制'); closeCopyModal(); }
   else { toast('请长按文字手动复制'); }
 }
@@ -456,6 +542,42 @@ function closeModal() { document.getElementById('modal').classList.remove('show'
 document.getElementById('modal').addEventListener('click', function (e) {
   if (e.target === this) closeModal();
 });
+
+/* ---- 公众号头图 ---- */
+// 图片/下载链接带上一次密码（浏览器禁 cookie 时也能显示）
+document.querySelectorAll('.cover-img').forEach(function (img) {
+  img.src = withPwd(img.dataset.src);
+});
+document.querySelectorAll('.cover-acts a.dl').forEach(function (a) {
+  a.href = withPwd(a.dataset.src);
+});
+
+// 手动换一张 / 首次补生成
+async function genCover(id, btn) {
+  if (!btn) btn = event && event.target;
+  const old = btn ? btn.textContent : '换一张';
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  toast('AI 正在画封面，约 10 秒');
+  try {
+    const r = await api('/cover/' + id + '/regenerate', {});
+    if (r.ok) { setTimeout(function () { location.reload(); }, 11000); }
+    else {
+      toast(r.error || '生成失败，稍后再试');
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+  } catch (e) {
+    toast('生成失败：' + e);
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+// 有稿件正在生成头图时自动刷一次，省得手动点
+(function () {
+  const ph = document.querySelector('.cover-ph');
+  if (ph && ph.textContent.indexOf('AI 正在画封面') >= 0) {
+    setTimeout(function () { location.reload(); }, 10000);
+  }
+})();
 </script>
 </body>
 </html>

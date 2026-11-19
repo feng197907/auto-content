@@ -7,15 +7,25 @@
 
 from __future__ import annotations
 
-import re
 import threading
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request, Response, session
+from flask import (
+    Flask,
+    jsonify,
+    render_template,
+    request,
+    Response,
+    send_file,
+    session,
+)
 
 import config
+import cover as cover_mod
+import wechat
 import notify as notifier
 from pipeline import (
     load_queue,
@@ -96,13 +106,6 @@ def hot_fmt(value: int) -> str:
     if value >= 10000:
         return f"{value / 10000:.0f}万"
     return str(value)
-
-
-def strip_html(text: str) -> str:
-    """把 HTML 转成可复制的纯文本。"""
-    text = re.sub(r"</(p|li|h2|h3|ul)>", "\n", text)
-    text = re.sub(r"<[^>]+>", "", text)
-    return text.strip()
 
 
 def find_article(queue: list[dict[str, Any]], article_id: str) -> int:
@@ -244,8 +247,77 @@ def update() -> Any:
     new_status = queue[index].get("status")
     if new_status == "approved" and old_status != "approved":
         queue[index]["approved_at"] = datetime.now().isoformat(timespec="seconds")
+        # 首次通过 → 后台自动生成公众号头图（不阻塞页面，失败也不影响通过）
+        if not queue[index].get("cover"):
+            queue[index]["cover_state"] = "generating"
+            save_queue(queue)
+            threading.Thread(
+                target=_cover_worker,
+                args=(article_id,),
+                daemon=True,
+            ).start()
+            return jsonify({"ok": True, "cover": "generating"})
 
     save_queue(queue)
+    return jsonify({"ok": True})
+
+
+def _cover_worker(article_id: str) -> None:
+    """后台线程：生成头图后写回队列。失败只记状态，不动稿件。"""
+    try:
+        queue = load_queue()
+        index = find_article(queue, article_id)
+        if index == -1:
+            return
+        path = cover_mod.generate_cover(queue[index], force=True)
+        queue = load_queue()
+        index = find_article(queue, article_id)
+        if index == -1:
+            return
+        if path:
+            queue[index]["cover"] = path
+            queue[index]["cover_at"] = datetime.now().isoformat(timespec="seconds")
+            queue[index]["cover_state"] = "done"
+        else:
+            queue[index]["cover_state"] = "failed"
+        save_queue(queue)
+    except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务打挂
+        print(f"[cover] 线程异常 {article_id}: {exc}")
+
+
+@app.route("/cover/<article_id>")
+def cover_file(article_id: str) -> Any:
+    """返回该稿件的头图文件。"""
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"error": "稿件不存在"}), 404
+
+    rel = queue[index].get("cover")
+    if not rel:
+        return jsonify({"error": "还没有头图"}), 404
+
+    path = Path(__file__).resolve().parent / rel
+    if not path.exists():
+        return jsonify({"error": "头图文件丢失"}), 404
+
+    return send_file(path, mimetype="image/jpeg", max_age=0)
+
+
+@app.route("/cover/<article_id>/regenerate", methods=["POST"])
+def cover_regenerate(article_id: str) -> Any:
+    """手动换一张头图（覆盖旧的）。"""
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+
+    if queue[index].get("cover_state") == "generating":
+        return jsonify({"ok": False, "error": "正在生成中，请稍候"}), 409
+
+    queue[index]["cover_state"] = "generating"
+    save_queue(queue)
+    threading.Thread(target=_cover_worker, args=(article_id,), daemon=True).start()
     return jsonify({"ok": True})
 
 
@@ -273,8 +345,14 @@ def plain(article_id: str) -> Any:
         return jsonify({"error": "稿件不存在"}), 404
 
     article = queue[index]
-    content = f"{article['title']}\n\n{strip_html(article['body'])}"
-    return jsonify({"title": article["title"], "content": content})
+    # html：带内联样式的富文本，粘到公众号能保留小标题竖线/加粗/列表圆点
+    # content：纯文本兜底，给不认格式的平台用
+    # 标题单独返回：公众号/头条号/百家号都是标题、正文分开录入，正文里不必重复标题
+    return jsonify({
+        "title": article["title"],
+        "content": wechat.to_plain_text(article["body"]),
+        "html": wechat.to_wechat_html(article["body"]),
+    })
 
 
 @app.route("/preview/<article_id>")
@@ -289,7 +367,8 @@ def preview(article_id: str) -> Any:
     return render_template(
         "preview.html",
         title=article["title"],
-        body=article["body"],
+        # 用和"复制成品"完全相同的富文本，保证预览所见 = 粘贴所得
+        body=wechat.to_wechat_html(article["body"]),
         platforms=config.TARGET_PLATFORMS,
         author=config.SITE_AUTHOR,
     )

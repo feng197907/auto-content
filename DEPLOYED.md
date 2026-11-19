@@ -156,3 +156,69 @@ crontab -l
 - 验证：生产 5 条选题全部带真实素材（96-300 字摘要），来自 5 个不同国内源；百度 52 条零错配；服务 active；审核页 200；cron 仍在；队列 0 篇。
 - 备份：`config.py/hot_topics.py/pipeline.py` 的 `.bak_cn` 副本。
 - **已知限制**：免费模型 glm-4-flash 仍会写"表明机构看好前景"这类软性推测，提示词已尽力压制但无法根除；要好效果建议换 glm-4.7-flash 或更强模型。
+
+## 十五、成品署名改为公众号新名（2026-11-19）
+- 背景：公众号由「35岁前的Plan B」改名为「Plan B 的AI笔记」，正文方向已转 AI/数码科技。
+- 改动：`config.py` 的 `SITE_AUTHOR` 由写死的「远方守护」（早期别的项目残留）改为 `os.getenv("SITE_AUTHOR", "Plan B 的AI笔记")`。
+- 生效范围：仅 `/preview/<id>` 成品预览的署名行（`{{ author }} · 发布于 头条号 / 百家号 / 公众号`）；`/plain/<id>` 复制文本不含署名。
+- 以后换名：服务器 `.env` 加一行 `SITE_AUTHOR=新名字` 即可，不用再改代码（重启服务生效）。
+- 本地验证：`/preview/` 渲染 200，署名行输出正确。
+- 已部署（同日）：服务器 `/opt/auto-content/config.py` 已同步，备份 `config.py.bak_author`，`systemctl restart auto-content` 后 active。
+- 线上验证：队列 3 篇，`/preview/a08c9bc65c16` 署名行输出 `Plan B 的AI笔记 · 发布于 头条号 / 百家号 / 公众号`；审核页 200。
+- 注：该机 root 走密码登录（公钥不通），主机指纹与早期记录不同；部署用 paramiko + `SSHPASS` 环境变量，密码不入仓库。
+
+## 十六、公众号头图自动生成（2026-11-19）
+- 需求：稿件审核通过后，自动配一张对应的公众号头图（不要每次手动找图）。
+- 方案取舍：
+  - 用**智谱 CogView-3-Flash**（免费，服务器直连实测 8-12 秒/张）；实测 `cogview-4` 返回 1113 余额不足，故用 3-flash。
+  - 直接请求 **1808x768（精确 2.35:1）**，和公众号大图 900x383 同比例，避免服务器装 Pillow 和中文裁剪（该机无 PIL、无中文字体）。
+  - **不抓原文配图**：各平台有防盗链且图片版权不清，统一 AI 生成。
+  - 图上不压标题文字（中文小字易糊，公众号列表本身显示标题）；平台自动右下角打「AI生成」标识，符合生成式内容标识要求。
+- 实现：
+  - 新增 `cover.py`：`build_cover_prompt()`（标题关键词→画面意象，6 组规则 + 兜底；硬禁文字/logo/人脸）+ `generate_cover()`（失败重试 1 次，任何失败返回 None）+ `--backfill` 命令行补图。
+  - `app.py`：`/update` 首次转 approved 时置 `cover_state=generating` 并起后台线程，**不阻塞通过操作**；`GET /cover/<id>` 出图；`POST /cover/<id>/regenerate` 换一张；失败只写 `cover_state=failed`，稿件不受影响。
+  - `review.html`：已通过卡片新增头图区（缩略图 + 生成中占位 + 「换一张」+「下载头图」），生成中 10 秒自动刷新。
+- 验证：本地端到端（approve→12.4s 出图→/cover 200→重复通过不重生成）；生产端到端（临时测试稿 approve→覆盖生成 240KB→删除测试稿与图，队列回到 3 篇）。
+- 已验证产物：`data/covers/a08c9bc65c16.jpg`（NGINX 漏洞稿，110KB）。
+- 备份：`app.py.bak_cover`、`templates/review.html.bak_cover`。
+- 成本：cogview-3-flash 免费；5 篇/天≈5 张/天，耗时约 1 分钟，仅在"审核通过"时触发。
+
+## 十七、复制成品改为富文本（2026-11-19）
+- 问题：复制到公众号后小标题竖线、加粗、列表圆点全丢，只剩纯段落。原因：`/plain` 只返回纯文本（strip_html 去标签），剪贴板里没有 text/html。
+- 根因补充：公众号编辑器**只保留内联 style**，会丢弃 `<style>`、class 和外链 CSS。所以光有 HTML 标签也不够，必须把样式写进每个标签的 style 属性。
+- 实现：
+  - 新增 `wechat.py`：`to_wechat_html()` 用 HTMLParser 把 h2/p/li/strong/a 全部翻译成带内联 style 的 `<p>`/`<section>`（h2 → 左侧 3px 蓝色竖线小标题；li → `•&nbsp;` 圆点段落，因为公众号对 `<ul><li>` 清洗不稳定会丢点）；`to_plain_text()` 作纯文本兜底。
+  - `app.py`：`/plain/<id>` 增加 `html` 字段（`content` 改为**正文不含标题**——三个平台都是标题、正文分开录入）；`/preview/<id>` 改用同一份 `to_wechat_html`，保证预览所见 = 粘贴所得；删除已无用的 `strip_html`。
+  - `review.html`：复制逻辑改为 `copyRich()` 三级兜底——① ClipboardItem 同时写 text/html + text/plain（需 HTTPS/localhost）② execCommand 把 HTML 塞进离屏 `#richHolder` 选中复制（HTTP 下也带格式）③ 弹窗改成 `contenteditable` 富文本区，长按复制同样带样式。
+- 验证：本地 `/plain` 返回 html 30 处内联样式；`/preview` 含 border-left:3px；生产已部署，NGINX 稿 html 14 处内联样式、3 个列表圆点，index/preview 均 200。
+- 备份：`app.py.bak_rich`、`templates/review.html.bak_rich`。
+- 注意：`content` 语义已变（不再含标题行），前端 toast 明确提示「标题单独填」。
+
+## 十八、写作模板改造：结论先行 + 可执行（2026-11-19）
+- 起因：那篇 NGINX 稿被行家一看就知道是机器写的——没有版本号、没有自查命令、三节内容互相重复、结尾三条全是空话。根因不在文笔，在**提示词只要求"分点+小标题"，没要求"读完能办事"**。
+- 改动：
+  1. `config.py` 新增 `ARTICLE_SKELETON`：6 段结构写死——①80 字内钩子（禁"近日/据悉/随着"）②先给答案（有版本号就写，没有就说"以官方公告为准"）③3 个陈述句小标题（禁设问）④每节首句加粗、段落≤120 字 ⑤命令块只允许查看类和动作类，配置示例行必须来自素材 ⑥结尾一个明确动作。`build_prompt` 与 `build_optimize_prompt` 均引用，并附"自检三问"。
+  2. `pipeline.markdown_to_html` 重写：`**粗**`→`<strong>`（原来直接剥掉，导致重点全丢）、``` 围栏→`<pre><code>`、行内 `` ` ``→`<code>`。
+  3. `wechat.py` 支持 `<pre>`：转深色 `section` + 等宽字体 + `<br>` 换行（公众号会吃掉 pre 的换行和缩进）。
+  4. `pipeline.structure_issues()` + 一次重试：检查"无小标题/超 4 个/设问句/加粗不足/空话过多/句子重复/标题数字与素材不符"，不达标就把问题清单回灌模型重写一次，选问题更少的那版。
+  5. `pipeline._smart_summary()`：RSS 摘要不再硬截 300 字，改为保留前两句 + 所有含数字的句子（版本号/CVE/金额几乎都在这些句子里）。之前"修复版本 1.30.7"就是这样被截掉的。
+  6. 主模型切回 `glm-4.7-flash`（结构遵循明显更好），`glm-4-flash` 降为限流备用。
+- 实测：4.7 能主动写出钩子、陈述句小标题、加粗；但**今晚 4.7 多次返回 429 限流**，自动降级到 4-flash 后质量明显回落（小标题变 4 个、无钩子）。重试机制实测生效（"小标题 5 个 + 设问句"→ 重写后通过）。
+- 已知限制：4-flash 仍会软性推测归因、会把"1000 亿"写成"百亿"（中文数量级错位，代码只能校验阿拉伯数字）。要好效果得换付费模型（deepseek-chat 约 1 元/百万 token）。
+- 备份：`config.py.bak_skeleton`、`pipeline.py.bak_skeleton`、`wechat.py.bak_skeleton`。
+- 验证：生产 `build_prompt` 含结构模板与命令约束、`structure_issues` 正反例均符合预期、富文本 pre 正常渲染、审核页 200、服务 active。
+
+## 十九、写作格式按「爆款结构」补齐（2026-11-19）
+- 起因：整理出公众号爆款文的通用格式（标题公式 / 钩子 / 三节 / 结尾动作 / 排版 / 自检）后对照代码，发现模板只覆盖了「结构」，还缺 5 项：标题公式、记忆点密度、段落长度上限、结尾禁套话、加粗密度上限。
+- 改动：
+  1. `config.py` 新增 `TITLE_RULE`（四公式：具体信息点 / 数字盘点 / 反常识 / 利益直给；12-20 字；禁"揭秘/震惊/速看/炸裂/马上删"），两个 prompt 共用，替换原来那句"20 字以内"。
+  2. `ARTICLE_SKELETON` 补：开头四种钩子写法、每 300 字必须有一个记忆点、段落 120→**100 字**、结尾禁"综上所述/希望对你有帮助"、全文加粗**≤5 处**。
+  3. `structure_issues()` 新增 7 类检查：标题超 22 字、标题诱导词、开头新闻体套话、单段超 120 字、加粗超 8 处、结尾总结套话、把 CVSS 说成"满分"。
+  4. 新增 `split_long_paragraphs()`：超长段按句自动拆开。切点用 `(?<=[。！？])(?!</)`，再用标签栈校验每句配平，**标签跨句就整段放弃**（不冒险产出坏 HTML）。
+  5. 新增 `strip_unsafe_config()`：删掉代码块里素材没给过的配置行。模型实测写出过 `listen 80 http2;`（HTTP 端口配 HTTP/2，语法本身就是错的）——这种示例读者照抄能把服务改挂。整块只剩注释的也一并删掉（深色空块太突兀）。
+  6. 新增 `tidy_spaces()`：删中文（含中文标点）之间的半角空格，数字与英文两侧的空格保留。
+  7. `wechat.py` / `preview.html` 排版：正文 16→**17px**、行高 1.9→**1.95**、字距 .3→**.4px**、段距 18→20px、小标题 18→19px。
+- 验证：本地反例一次命中 7 条、正例 0 条；端到端跑 3 轮，最后一轮标题 21 字、**残留问题 0**、3 个小标题、5 处加粗、2 个纯命令代码块、15 段最长 103 字，编造配置行被自动剥离。重试机制实测拦下过 27 字标题。
+- 生产验证：7 项配置/函数检查全 True，index 200、preview 200、服务 active、队列 3 篇未受影响。
+- 备份：`config.py.bak_viral`、`pipeline.py.bak_viral`、`wechat.py.bak_viral`、`templates/preview.html.bak_viral`。
+- 已知限制：标题超 22 字只报错不硬截（截断会毁语义），重试一次仍不达标就交人工；中文数量级错位（"1000 亿"写成"百亿"）代码拦不住。

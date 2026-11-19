@@ -9,6 +9,10 @@ data/*.json
 data/*.log
 data/*.bak*
 
+# 生成产物：头图、本地样张，不入库
+output/
+data/covers/
+
 # 含真实服务器信息的本地运维备份
 DEPLOYED.local.bak
 *.local.*
