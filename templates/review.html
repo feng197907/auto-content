@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <!-- viewport-fit=cover 适配全面屏；user-scalable 不禁用，保留微信缩放 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>稿件审核 · 自动化内容矩阵</title>
+  <style>
+    :root {
+      --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+      --ok:#0f6e56; --warn:#b45309; --danger:#c0392b;
+      --bg:#f3f4f6; --card:#fff; --primary:#1f2937;
+    }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html { -webkit-text-size-adjust:100%; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",
+           "PingFang SC","Microsoft YaHei",sans-serif;
+           font-size:15px; line-height:1.6; color:var(--ink); background:var(--bg); }
+    .wrap { max-width:960px; margin:0 auto; padding:12px 12px calc(40px + env(safe-area-inset-bottom)); }
+
+    /* ---- 头部 ---- */
+    .head { display:flex; align-items:center; justify-content:space-between;
+            flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+    h1 { font-size:20px; margin:0; }
+    .sub { color:var(--muted); font-size:12px; }
+
+    /* ---- 统计 ---- */
+    .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px; }
+    .stat { background:var(--card); border:1px solid var(--line); border-radius:10px;
+            padding:10px 8px; text-align:center; }
+    .stat .label { color:var(--muted); font-size:11px; }
+    .stat .num { font-size:20px; font-weight:700; margin-top:2px; line-height:1.2; }
+    .stat.hl .num { color:var(--warn); }
+
+    /* ---- 工具区（生成/推送）：手机默认折叠 ---- */
+    details.tools { background:var(--card); border:1px solid var(--line);
+                    border-radius:10px; margin-bottom:12px; }
+    details.tools > summary { padding:11px 14px; font-size:14px; font-weight:600;
+                              cursor:pointer; list-style:none; display:flex;
+                              align-items:center; justify-content:space-between; }
+    details.tools > summary::-webkit-details-marker { display:none; }
+    details.tools > summary::after { content:'▾'; color:var(--muted); font-size:12px; }
+    details.tools[open] > summary::after { content:'▴'; }
+    .tools-body { padding:0 14px 12px; }
+    .toolrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+               padding:8px 0; border-top:1px solid var(--line); }
+    .toolrow:first-child { border-top:none; }
+    .toolrow .lbl { font-size:13px; color:var(--muted); min-width:52px; }
+    select { padding:9px 10px; border:1px solid var(--line); border-radius:8px;
+             font-size:16px; background:#fff; min-height:42px; }
+
+    button { padding:9px 14px; border:1px solid var(--line); border-radius:8px;
+             background:#fff; cursor:pointer; font-size:14px; min-height:42px;
+             touch-action:manipulation; }
+    button.primary { background:var(--primary); color:#fff; border-color:var(--primary); }
+    button.ok { background:var(--ok); color:#fff; border-color:var(--ok); }
+    button.danger { color:var(--danger); border-color:#f0c8c2; }
+    button.ghost { background:#f9fafb; }
+    button:active { transform:scale(.98); }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    button.wide { flex:1; }
+
+    /* ---- 筛选 tabs ---- */
+    .tabs { display:flex; gap:8px; margin-bottom:12px; }
+    .tabs a { flex:1; text-align:center; padding:9px 6px; text-decoration:none;
+              color:var(--muted); border:1px solid var(--line); border-radius:8px;
+              font-size:14px; background:#fff; }
+    .tabs a.on { background:var(--primary); color:#fff; border-color:var(--primary); font-weight:600; }
+
+    /* ---- 稿件卡片 ---- */
+    .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+            padding:14px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,.03); }
+    .card .meta { display:flex; flex-wrap:wrap; align-items:center; gap:6px;
+                  color:var(--muted); font-size:12px; margin-bottom:10px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:5px; font-size:11px; white-space:nowrap; }
+    .src-hot { background:#faece7; color:var(--warn); }
+    .src-lib { background:#eef2f7; color:#475569; }
+    .mode-ai { background:#e1f5ee; color:#0f766e; }
+    .mode-fact { background:#e8f0fe; color:#1d4ed8; }
+    .status { display:inline-block; padding:2px 9px; border-radius:5px; font-size:11px; font-weight:600; }
+    .s-pending { background:#faece7; color:var(--warn); }
+    .s-approved { background:#e1f5ee; color:var(--ok); }
+    .hot-num { color:var(--warn); font-weight:600; }
+    .source-link { color:#2563eb; text-decoration:none; word-break:break-all; font-size:11px; }
+    .src-line { width:100%; margin-top:2px; }
+
+    input.title { width:100%; font-size:16px; font-weight:600; padding:10px;
+                  border:1px solid var(--line); border-radius:8px; margin-bottom:8px;
+                  background:#fff; }
+    .field-lbl { font-size:11px; color:var(--muted); margin:2px 0 4px; }
+    textarea { width:100%; min-height:130px; font-size:16px; line-height:1.6;
+               padding:10px; border:1px solid var(--line); border-radius:8px;
+               font-family:inherit; resize:vertical; background:#fff; }
+
+    /* 操作区：主操作独占一行，次操作两列 */
+    .actions { margin-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .actions button { min-height:46px; font-size:15px; }
+    .actions .act-main { grid-column:1 / -1; font-weight:600; font-size:16px; min-height:50px; }
+    .actions .act-full { grid-column:1 / -1; }
+    .actions .act-danger { grid-column:1 / -1; }
+
+    .toast { position:fixed; bottom:calc(24px + env(safe-area-inset-bottom)); left:50%;
+             transform:translateX(-50%); background:rgba(31,41,55,.95); color:#fff;
+             padding:11px 18px; border-radius:8px; font-size:14px; opacity:0;
+             transition:opacity .2s; pointer-events:none; z-index:99; max-width:88vw; text-align:center; }
+    .toast.show { opacity:1; }
+    .empty { text-align:center; color:var(--muted); padding:44px 0; }
+
+    /* ---- 弹窗：手机接近全屏 ---- */
+    .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:50;
+             align-items:flex-end; justify-content:center; }
+    .modal.show { display:flex; }
+    .modal-box { background:#fff; border-radius:14px 14px 0 0; width:100%;
+                 max-height:92vh; overflow:auto;
+                 padding-bottom:env(safe-area-inset-bottom); }
+    .modal-head { display:flex; justify-content:space-between; align-items:center;
+                  padding:14px 16px; border-bottom:1px solid var(--line);
+                  position:sticky; top:0; background:#fff; z-index:1; }
+    .modal-head b { font-size:15px; }
+    .modal-head button { min-height:36px; padding:6px 12px; }
+    .modal-body { padding:16px; }
+    .modal-body h1 { font-size:21px; line-height:1.4; margin:0 0 8px; }
+    .modal-body h2 { font-size:17px; margin-top:22px; }
+    .modal-body .by { color:var(--muted); font-size:12px; margin-bottom:18px; }
+    .tags { margin-top:22px; color:var(--muted); font-size:12px; }
+
+    /* 复制兜底弹窗 */
+    .copy-tip { background:#fff8e6; border:1px solid #f5dfa8; color:#8a6100;
+                padding:10px 12px; border-radius:8px; font-size:13px; margin-bottom:12px; }
+    textarea.copybox { min-height:240px; font-size:16px; }
+
+    /* ---- 桌面端增强 ---- */
+    @media (min-width:641px) {
+      body { font-size:15px; }
+      .wrap { padding:24px 20px 60px; }
+      h1 { font-size:23px; }
+      .stats { grid-template-columns:repeat(5,1fr); gap:10px; }
+      .stat { padding:14px 12px; }
+      .stat .num { font-size:24px; }
+      details.tools > summary { cursor:default; }
+      details.tools > summary::after { display:none; }
+      .card { padding:18px 20px; }
+      .actions { display:flex; flex-wrap:wrap; }
+      .actions button { min-height:auto; font-size:13px; }
+      .actions .act-main { font-size:14px; }
+      .modal { align-items:center; padding:20px; }
+      .modal-box { border-radius:12px; max-width:680px; max-height:86vh; }
+      .modal-head, .modal-body { padding-left:24px; padding-right:24px; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>稿件审核</h1>
+      <div class="sub">服务器自动生产，你只做精修和发布</div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat hl"><div class="label">待审核</div><div class="num">{{ counts.pending }}</div></div>
+    <div class="stat"><div class="label">今日生成</div><div class="num">{{ counts.today }}</div></div>
+    <div class="stat"><div class="label">已通过</div><div class="num">{{ counts.approved }}</div></div>
+    <div class="stat"><div class="label">通过率</div><div class="num">{{ counts.rate }}%</div></div>
+    <div class="stat"><div class="label">总稿件</div><div class="num">{{ counts.all }}</div></div>
+  </div>
+
+  <details class="tools" id="toolsBox">
+    <summary>生成 / 推送工具</summary>
+    <div class="tools-body">
+      <div class="toolrow">
+        <span class="lbl">立即写</span>
+        <select id="genCount">
+          <option value="3">3 篇</option>
+          <option value="5" selected>5 篇</option>
+          <option value="10">10 篇</option>
+        </select>
+        <button class="primary wide" id="genBtn" onclick="generate()">生成</button>
+      </div>
+      <div class="toolrow">
+        <span class="lbl">推送</span>
+        <button class="ghost wide" id="notifyBtn" onclick="pushNotify()">推送待审稿到微信</button>
+      </div>
+      <div class="toolrow">
+        <span class="sub">审核地址：{{ review_url if review_url else '未配置（填 .env 的 REVIEW_URL）' }}</span>
+      </div>
+    </div>
+  </details>
+
+  <div class="tabs">
+    <a href="/?status=pending" class="{{ 'on' if current == 'pending' else '' }}">待审核</a>
+    <a href="/?status=approved" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
+    <a href="/?status=all" class="{{ 'on' if current == 'all' else '' }}">全部</a>
+  </div>
+
+  {% if not articles %}
+  <div class="empty">这里还没有稿件。展开上面「生成 / 推送工具」点「生成」试试。</div>
+  {% endif %}
+
+  {% for a in articles %}
+  <div class="card" id="card-{{ a.id }}">
+    <div class="meta">
+      <span class="badge {{ 's-pending' if a.status == 'pending' else 's-approved' }}">
+        {{ '待审核' if a.status == 'pending' else '已通过' }}
+      </span>
+      <span class="badge {{ 'src-hot' if a.hot else 'src-lib' }}">
+        {{ '热榜·' + a.source if a.hot else a.source }}
+      </span>
+      {% if a.hot %}<span class="hot-num">热度 {{ a.hot | hot_fmt }}</span>{% endif %}
+      <span class="badge {{ 'mode-ai' if a.mode and 'AI' in a.mode else 'mode-fact' }}">
+        {{ a.mode | default('真实素材卡', true) }}
+      </span>
+      {% if a.url %}
+      <span class="src-line">原文：<a class="source-link" href="{{ a.url }}" target="_blank" rel="noopener">点开核对</a></span>
+      {% endif %}
+    </div>
+    <input class="title" id="title-{{ a.id }}" value="{{ a.title }}" aria-label="标题">
+    <div class="field-lbl">正文（可直接修改）</div>
+    <textarea id="body-{{ a.id }}" aria-label="正文">{{ a.body }}</textarea>
+    <div class="actions">
+      {% if a.status == 'approved' %}
+      {# 已通过列表：主按钮改为 AI 优化，基于原素材重写覆盖当前稿件 #}
+      <button class="act-main" style="background:#1d4ed8;color:#fff;border-color:#1d4ed8;font-weight:600"
+              id="opt-{{ a.id }}" onclick="aiOptimize('{{ a.id }}')">✦ AI优化 · 重写本篇</button>
+      {% else %}
+      <button class="ok act-main" onclick="saveAnd('{{ a.id }}','approved')">保存并通过</button>
+      {% endif %}
+      <button onclick="copyPlain('{{ a.id }}')">复制成品</button>
+      <button class="ghost" onclick="preview('{{ a.id }}')">预览成品</button>
+      <button class="ghost" onclick="saveOnly('{{ a.id }}')">仅保存</button>
+      {% if a.status == 'approved' %}
+      <button class="ghost" onclick="setStatus('{{ a.id }}','pending')">退回待审</button>
+      {% endif %}
+      <button class="danger act-danger" onclick="del('{{ a.id }}')">删除</button>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 成品预览弹窗 -->
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>成品预览 · 模拟发布效果</b>
+      <button onclick="closeModal()">关闭</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- 复制兜底弹窗：HTTP/微信内置浏览器下 clipboard API 不可用时用 -->
+<div class="modal" id="copyModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>手动复制成品</b>
+      <button onclick="closeCopyModal()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="copy-tip">长按下方文字 → 全选 → 复制，再到平台粘贴发布。（当前为非加密连接，无法一键复制）</div>
+      <textarea class="copybox" id="copyBox" readonly></textarea>
+      <div style="margin-top:12px;display:flex;gap:8px;">
+        <button class="primary wide" onclick="retryCopy()">再试一键复制</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 桌面端默认展开工具区，手机端默认收起
+(function () {
+  if (window.innerWidth > 640) document.getElementById('toolsBox').open = true;
+})();
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// 从审核链接里读出一次密码，后续所有请求都带上。
+// 服务端也会记住登录会话，这里是双保险（防止个别浏览器禁 cookie）。
+const PWD = new URLSearchParams(location.search).get('pwd') || '';
+function withPwd(path) {
+  if (!PWD) return path;
+  return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(PWD);
+}
+
+// 统一解析响应：401 时给出明确提示，不再把"请输入访问密码"当数据用。
+async function readJson(res) {
+  if (res.status === 401) throw new Error('登录已失效，请用微信推送的链接重新打开');
+  return res.json();
+}
+
+async function api(path, payload) {
+  const data = Object.assign({}, payload);
+  if (PWD) data.pwd = PWD;
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+  return readJson(res);
+}
+
+async function generate() {
+  const btn = document.getElementById('genBtn');
+  const count = parseInt(document.getElementById('genCount').value, 10);
+  btn.disabled = true; btn.textContent = '生成中...';
+  toast('服务器正在写稿，请稍候');
+  try {
+    const r = await api('/generate', {count: count});
+    if (r.ok) {
+      toast(r.demo ? '演示模式：新增 ' + r.created + ' 篇' : '已生成 ' + r.created + ' 篇');
+      setTimeout(() => location.reload(), 800);
+    } else { toast(r.error || '生成失败'); }
+  } catch (e) { toast('生成失败：' + e); }
+  finally { btn.disabled = false; btn.textContent = '生成'; }
+}
+
+async function pushNotify() {
+  const btn = document.getElementById('notifyBtn');
+  btn.disabled = true; btn.textContent = '推送中...';
+  try {
+    const r = await api('/notify', {});
+    toast(r.ok ? '已推送到微信' : (r.error || '推送失败'));
+  } catch (e) { toast('推送失败：' + e); }
+  finally { btn.disabled = false; btn.textContent = '推送待审稿到微信'; }
+}
+
+function payload(id) {
+  return {
+    id: id,
+    title: document.getElementById('title-' + id).value,
+    body: document.getElementById('body-' + id).value
+  };
+}
+
+async function saveOnly(id) {
+  const r = await api('/update', payload(id));
+  toast(r.ok ? '已保存' : '保存失败');
+}
+
+async function saveAnd(id, status) {
+  const data = payload(id);
+  data.status = status;
+  const r = await api('/update', data);
+  toast(r.ok ? '已通过，可以复制发布了' : '操作失败');
+  if (r.ok) setTimeout(() => location.reload(), 600);
+}
+
+// AI优化：基于原稿真实素材重写，覆盖当前稿件（保持已通过状态）。
+// 会覆盖手改的标题正文，故二次确认；调用期间禁用按钮防重复提交。
+async function aiOptimize(id) {
+  if (!confirm('AI 将基于这篇的原始素材重写一版，覆盖当前标题和正文（仍保持已通过）。确定继续？')) return;
+  const btn = document.getElementById('opt-' + id);
+  const oldText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'AI 重写中，请稍候…'; }
+  toast('AI 正在重写，通常几秒到几十秒');
+  try {
+    const r = await api('/optimize', {id: id});
+    if (r.ok) {
+      toast('已重写：「' + (r.title || '').slice(0, 18) + '」');
+      setTimeout(() => location.reload(), 900);
+    } else {
+      toast(r.error || '优化失败，原稿未改动');
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+  } catch (e) {
+    toast('优化失败：' + e + '（原稿未改动）');
+    if (btn) { btn.disabled = false; btn.textContent = oldText; }
+  }
+}
+
+async function setStatus(id, status) {
+  const r = await api('/update', {id: id, status: status});
+  if (r.ok) location.reload();
+}
+
+async function del(id) {
+  if (!confirm('确定删除这篇稿件？')) return;
+  const r = await api('/delete', {id: id});
+  if (r.ok) location.reload();
+}
+
+/* ---- 复制：三重兜底 ----
+   1) Clipboard API（需 HTTPS/localhost）
+   2) execCommand('copy')（HTTP 下多数浏览器可用）
+   3) 弹出可选中文本框，用户长按手动复制（微信内置浏览器保底） */
+async function tryCopy(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    ta.setSelectionRange(0, ta.value.length); // iOS 兼容
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) return true;
+  } catch (e) {}
+  return false;
+}
+
+let copyTextCache = '';
+async function copyPlain(id) {
+  try {
+    const res = await fetch(withPwd('/plain/' + id));
+    const data = await readJson(res);
+    const text = data.content || '';
+    if (!text) { toast('内容为空'); return; }
+    const ok = await tryCopy(text);
+    if (ok) {
+      toast('已复制，去平台粘贴发布');
+    } else {
+      // 前两种都失败，弹出手动复制框
+      copyTextCache = text;
+      document.getElementById('copyBox').value = text;
+      document.getElementById('copyModal').classList.add('show');
+      // 尝试自动选中，方便长按
+      const box = document.getElementById('copyBox');
+      box.focus(); box.setSelectionRange(0, box.value.length);
+    }
+  } catch (e) { toast('复制失败：' + e); }
+}
+
+async function retryCopy() {
+  const ok = await tryCopy(copyTextCache);
+  if (ok) { toast('已复制'); closeCopyModal(); }
+  else { toast('请长按文字手动复制'); }
+}
+
+function closeCopyModal() { document.getElementById('copyModal').classList.remove('show'); }
+document.getElementById('copyModal').addEventListener('click', function (e) {
+  if (e.target === this) closeCopyModal();
+});
+
+async function preview(id) {
+  const res = await fetch(withPwd('/preview/' + id));
+  if (res.status === 401) { toast('登录已失效，请用微信推送的链接重新打开'); return; }
+  const html = await res.text();
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal() { document.getElementById('modal').classList.remove('show'); }
+document.getElementById('modal').addEventListener('click', function (e) {
+  if (e.target === this) closeModal();
+});
+</script>
+</body>
+</html>

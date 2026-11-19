@@ -1,0 +1,24 @@
+# 密钥与隐私配置——绝不上传
+.env
+.env.*
+*.env
+
+# 运行期数据（含生成稿件、日志、备份）
+data/queue.json
+data/*.json
+data/*.log
+data/*.bak*
+
+# 含真实服务器信息的本地运维备份
+DEPLOYED.local.bak
+*.local.*
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+.venv/
+env/
