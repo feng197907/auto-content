@@ -315,7 +315,10 @@ def cover_file(article_id: str) -> Any:
     if not path.exists():
         return jsonify({"error": "头图文件丢失"}), 404
 
-    return send_file(path, mimetype="image/jpeg", max_age=0)
+    # 换一张会覆盖同名文件：必须禁用缓存，否则浏览器一直显示旧图
+    resp = send_file(path, mimetype="image/jpeg", max_age=0)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.route("/cover/<article_id>/regenerate", methods=["POST"])

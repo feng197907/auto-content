@@ -260,13 +260,14 @@
     <div class="cover-box">
       <div class="cover-head">
         <span>公众号头图 · 2.35:1（900×383）</span>
-        {% if a.cover %}<span>已生成</span>
-        {% elif a.cover_state == 'generating' %}<span>生成中…</span>
+        {% if a.cover_state == 'generating' %}<span>生成中…</span>
+        {% elif a.cover %}<span>已生成</span>
         {% elif a.cover_state == 'failed' %}<span>上次失败，可重试</span>
         {% else %}<span>未生成</span>{% endif %}
       </div>
       {% if a.cover %}
-      <img class="cover-img" data-src="/cover/{{ a.id }}" alt="公众号头图">
+      {# v=用生成时间做版本号：换一张后文件名不变，不加这个浏览器会一直显示旧图 #}
+      <img class="cover-img" data-src="/cover/{{ a.id }}{% if a.cover_at %}?v={{ a.cover_at }}{% endif %}" alt="公众号头图">
       {% elif a.cover_state == 'generating' %}
       <div class="cover-ph">AI 正在画封面，约 10 秒<br>稍等，页面会自动刷新</div>
       {% else %}
@@ -274,7 +275,7 @@
       {% endif %}
       <div class="cover-acts">
         <button onclick="genCover('{{ a.id }}', this)">{{ '换一张' if a.cover else '生成头图' }}</button>
-        {% if a.cover %}<a class="dl" data-src="/cover/{{ a.id }}" download="头图_{{ a.id }}.jpg">下载头图</a>{% endif %}
+        {% if a.cover %}<a class="dl" data-src="/cover/{{ a.id }}{% if a.cover_at %}?v={{ a.cover_at }}{% endif %}" download="头图_{{ a.id }}.jpg">下载头图</a>{% endif %}
       </div>
     </div>
     {% endif %}
@@ -620,10 +621,15 @@ async function genCover(id, btn) {  if (!btn) btn = event && event.target;
   }
 }
 
-// 有稿件正在生成头图时自动刷一次，省得手动点
+// 有稿件正在生成头图时自动刷一次，省得手动点。
+// 注意要同时认「已生成 + 正在换图」的情况：那种页面里没有占位块，只有 head 上的"生成中…"。
 (function () {
+  const head = document.querySelector('.cover-head');
+  const headText = head ? head.textContent : '';
   const ph = document.querySelector('.cover-ph');
-  if (ph && ph.textContent.indexOf('AI 正在画封面') >= 0) {
+  const generating = headText.indexOf('生成中') >= 0
+    || (ph && ph.textContent.indexOf('AI 正在画封面') >= 0);
+  if (generating) {
     setTimeout(function () { location.reload(); }, 10000);
   }
 })();

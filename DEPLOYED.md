@@ -539,3 +539,16 @@ crontab -l
 - `.venv/bin/python cover.py --prompt <稿件id>`：只打印脚本与 prompt，不出图、不花钱。
 - `.venv/bin/python cover.py --backfill`：给通过但没头图的稿件补图。
 - 已有头图不会自动替换，需在审核页逐篇点「换一张」。
+
+### 6) 换一张看不到变化（缓存坑，2026-11-20）
+- 现象：点「换一张」后过了 11 秒刷新，页面还是原来那张紫图。
+- 原因两条叠加：`/cover/<id>` 这个 URL 永远不变，浏览器直接命中缓存；
+  且「已生成 + 重新生成中」这一态原先只显示"已生成"，用户看不出正在重画。
+- 修法：
+  1. 模板给图片和下载链接加版本号 `?v={{ a.cover_at }}`（换一张后 cover_at 变化，URL 随之变）；
+  2. `cover_file()` 返回 `Cache-Control: no-store, max-age=0`，不让浏览器留存；
+  3. `.cover-head` 生成中优先于已生成；自动刷新脚本同时认「生成中…」文案，
+     使"已生成但正在换图"的页面也会在 10 秒后自动刷新。
+- 验证：模板两分支分别渲染出「已生成」/「生成中…」，img 与 dl 都带 `?v=`；
+  `GET /cover/<id>` 返回 200 且 `Cache-Control: no-store, max-age=0`。
+- 注意：「换一张」本身一直走的就是 `generate_cover(force=True)` → 新 prompt 逻辑，未绕过。
