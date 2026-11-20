@@ -1,16 +1,25 @@
-"""热榜选题抓取：抓全网实时热榜 + 国内技术社区热榜，带真实摘要和原文链接。
+"""热榜选题抓取：抓全网多平台实时热榜 + 国内技术社区热榜，带真实摘要和原文链接。
+
+数据源（2026-11-20 扩到八路，开关都在 config.py）：
+    知乎热榜 / 百度热搜 / 微博热搜 / 公众号搜索（搜狗）/ B站热搜 /
+    抖音热榜 / 快手热榜 / 头条热榜，另加掘金、GitHub、六个技术媒体 RSS。
 
 设计思路（重要）：
     全网热榜多是大众话题，与"AI/数码科技"垂直领域未必相关。
     所以不是直接拿热榜写稿，而是：
-      1. 抓头条/百度实时热榜（带热度值、真实摘要、原文链接）
+      1. 抓各平台实时热榜（带热度值、真实摘要、原文链接）
       2. 抓掘金技术热榜（国内开发者社区实时榜，纯技术内容）
       3. 用领域关键词打分，筛出相关的
       4. 相关的优先用并标注热度，不够时用备用词保底
 
+    摘要有无必须分清，它决定能写出多长的稿：
+      有摘要 —— 知乎（excerpt_area 整段问题描述，质量最高）、百度、微博（note）、
+                公众号搜索（搜狗返回的摘要）
+      只有标题 —— 抖音、快手、B站、头条（desc 留空，下游只写"是什么 + 怎么看"）
+
     每条条目都带 desc（真实新闻摘要）和 url（原文链接），
     供下游"基于真实素材写作"使用，避免 AI 凭空编造。
-    没有摘要的源（头条/CSDN）desc 留空，下游不会据此编造细节。
+    没有摘要的源 desc 一律留空，下游不会据此编造细节。
 
     领域关键词在 config.py 的 KEYWORDS_STRONG / KEYWORDS_WEAK 里配置，
     改方向只需改那两组词，不用动本文件。
@@ -23,7 +32,9 @@ from __future__ import annotations
 import re
 import time
 from datetime import date, timedelta
+from html import unescape
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -34,6 +45,23 @@ TOUTIAO_URL = "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
 BAIDU_URL = "https://top.baidu.com/board?tab=realtime"
 GITHUB_API = "https://api.github.com/search/repositories"
 JUEJIN_HOT_API = "https://api.juejin.cn/content_api/v1/content/article_rank"
+WEIBO_URL = "https://weibo.com/ajax/side/hotSearch"
+DOUYIN_URL = "https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/"
+DOUYIN_BACKUP_URL = "https://aweme.snssdk.com/aweme/v1/hot/search/list/"
+ZHIHU_URL = "https://www.zhihu.com/api/v3/feed/topstory/hot-list-web"
+KUAISHOU_URL = "https://www.kuaishou.com/graphql"
+BILIBILI_URL = "https://api.bilibili.com/x/web-interface/search/square"
+SOGOU_WEIXIN_URL = "https://weixin.sogou.com/weixin"
+
+# 浏览器 UA：微博/抖音/知乎/快手都做了反爬，默认的 python-requests UA 会被挡
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+}
+
 
 
 def fetch_toutiao(timeout: int = 8) -> list[dict[str, Any]]:
@@ -109,6 +137,285 @@ def fetch_baidu(timeout: int = 8) -> list[dict[str, Any]]:
             "source": "百度热搜",
         })
     return result
+
+
+def _to_hot(value: Any) -> int:
+    """把 "1196.5万" / "1163 万热度" / 12345 统一成整数热度，用于排序。"""
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value or "")
+    matched = re.search(r"(\d+(?:\.\d+)?)", text)
+    if not matched:
+        return 0
+    hot = float(matched.group(1))
+    if "亿" in text:
+        hot *= 100_000_000
+    elif "万" in text:
+        hot *= 10_000
+    return int(hot)
+
+
+def _clean_text(text: str, limit: int = 400) -> str:
+    """去标签、反转义、压缩空白，截到 limit 字。"""
+    text = re.sub(r"<[^>]+>", "", unescape(text or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def fetch_weibo(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
+    """抓微博实时热搜。
+
+    微博把榜单放在侧栏接口里，需要浏览器 UA + Referer，否则 403。
+    note 字段多数时候和 word 一模一样（就是标题本身），这种情况视为没有摘要——
+    拿标题当摘要喂给模型，它会把标题扩写成"新闻"，全是编的。
+    """
+    result: list[dict[str, Any]] = []
+    try:
+        response = requests.get(
+            WEIBO_URL,
+            headers={**BROWSER_HEADERS, "Referer": "https://weibo.com/"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        rows = (response.json().get("data") or {}).get("realtime") or []
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        print(f"  微博热搜抓取失败: {exc}")
+        return result
+
+    for row in rows[:limit]:
+        word = (row.get("word") or "").strip()
+        if not word:
+            continue
+        note = (row.get("note") or "").strip()
+        result.append({
+            "title": word,
+            "desc": "" if note == word else _clean_text(note),
+            "url": f"https://s.weibo.com/weibo?q={quote('#' + word + '#')}",
+            "hot": _to_hot(row.get("num") or row.get("raw_hot")),
+            "source": "微博热搜",
+        })
+    return result
+
+
+def fetch_douyin(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
+    """抓抖音热榜（只有标题和热度，没有摘要）。"""
+    result: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+
+    for url in (DOUYIN_URL, DOUYIN_BACKUP_URL):
+        try:
+            response = requests.get(
+                url,
+                headers={**BROWSER_HEADERS, "Referer": "https://www.douyin.com/"},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            print(f"  抖音热榜抓取失败({url.split('/')[2]}): {exc}")
+            continue
+        # 两个接口结构不同：前者 word_list 在顶层，后者在 data 里
+        rows = payload.get("word_list") or (payload.get("data") or {}).get("word_list") or []
+        if rows:
+            break
+
+    for row in rows[:limit]:
+        word = (row.get("word") or "").strip()
+        if not word:
+            continue
+        result.append({
+            "title": word,
+            "desc": "",
+            "url": f"https://www.douyin.com/search/{quote(word)}",
+            "hot": _to_hot(row.get("hot_value")),
+            "source": "抖音热榜",
+        })
+    return result
+
+
+def fetch_zhihu(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
+    """抓知乎热榜。
+
+    这是所有社会热榜里摘要质量最好的一个：excerpt_area 给的是问题描述原文，
+    足够写出有信息量的解读，所以它排在热榜类源的第一优先。
+    """
+    result: list[dict[str, Any]] = []
+    try:
+        response = requests.get(
+            ZHIHU_URL,
+            # 不带参数默认只回 3 条（实测），必须显式要 20 条
+            params={"limit": 20, "desktop": "true"},
+            headers={**BROWSER_HEADERS, "Referer": "https://www.zhihu.com/hot"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        rows = response.json().get("data") or []
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        print(f"  知乎热榜抓取失败: {exc}")
+        return result
+
+    for row in rows[:limit]:
+        target = row.get("target") or {}
+        title = _clean_text(
+            (target.get("title_area") or {}).get("text") or target.get("title") or "", 200
+        )
+        if not title:
+            continue
+        excerpt = _clean_text(
+            (target.get("excerpt_area") or {}).get("text") or target.get("excerpt") or ""
+        )
+        # 知乎摘要尾巴常带"更多资讯请下载××客户端"，是推广语，不是素材
+        excerpt = re.sub(r"更多资讯请下载.*$", "", excerpt).strip()
+        result.append({
+            "title": title,
+            "desc": excerpt,
+            "url": (target.get("link") or {}).get("url") or target.get("url") or "",
+            "hot": _to_hot((target.get("metrics_area") or {}).get("text")),
+            "source": "知乎热榜",
+        })
+    return result
+
+
+def fetch_kuaishou(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
+    """抓快手热榜（GraphQL，只有标题和热度，没有摘要）。
+
+    注意返回结构：items 是和 result 同级的兄弟字段，不是 result 的子字段
+    （result 是数字 1，踩过一次）。
+    """
+    result: list[dict[str, Any]] = []
+    body = {
+        "operationName": "visionHotRank",
+        "variables": {"page": "home"},
+        # 只能传 page；多传 period 会报 GRAPHQL_VALIDATION_FAILED
+        "query": (
+            "query visionHotRank($page: String) {"
+            " visionHotRank(page: $page) { items { id name hotValue } } }"
+        ),
+    }
+    try:
+        response = requests.post(
+            KUAISHOU_URL,
+            json=body,
+            headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.kuaishou.com/",
+                "Origin": "https://www.kuaishou.com",
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        node = (response.json().get("data") or {}).get("visionHotRank") or {}
+        rows = node.get("items") or []
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        print(f"  快手热榜抓取失败: {exc}")
+        return result
+
+    for row in rows[:limit]:
+        name = (row.get("name") or row.get("id") or "").strip()
+        if not name:
+            continue
+        result.append({
+            "title": name,
+            "desc": "",
+            "url": f"https://www.kuaishou.com/search/video?searchKey={quote(name)}",
+            "hot": _to_hot(row.get("hotValue")),
+            "source": "快手热榜",
+        })
+    return result
+
+
+def fetch_bilibili(limit: int = 15, timeout: int = 8) -> list[dict[str, Any]]:
+    """抓 B 站热搜（只有关键词，没有摘要）。
+
+    这个源和"AI/数码"最对得上——B 站热搜里科技数码占比远高于微博抖音，
+    所以在标题类源里它的相关命中率最高。
+    """
+    result: list[dict[str, Any]] = []
+    try:
+        response = requests.get(
+            BILIBILI_URL,
+            params={"limit": limit},
+            headers={**BROWSER_HEADERS, "Referer": "https://www.bilibili.com/"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        rows = ((response.json().get("data") or {}).get("trending") or {}).get("list") or []
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        print(f"  B站热搜抓取失败: {exc}")
+        return result
+
+    for row in rows[:limit]:
+        keyword = (row.get("keyword") or row.get("show_name") or "").strip()
+        if not keyword:
+            continue
+        result.append({
+            "title": keyword,
+            "desc": "",
+            "url": f"https://search.bilibili.com/all?keyword={quote(keyword)}",
+            "hot": _to_hot(row.get("heat_score")),
+            "source": "B站热搜",
+        })
+    return result
+
+
+def fetch_wechat_search(limit: int = 12, timeout: int = 10) -> list[dict[str, Any]]:
+    """抓搜狗微信的公众号文章搜索结果。
+
+    为什么不是"微信热搜"：微信搜一搜的榜单只在微信客户端里，没有公开接口
+    （搜狗微信的老热文榜 pcindex 已下线，实测 404）。能拿到的是公众号文章搜索：
+    同行在写什么、什么标题有人看，对选题其实比榜单更有用。
+
+    频控很严（连续多次请求会跳验证码），所以关键词限制在 3 个以内，
+    并且在 health 检查里单独观察。链接是搜狗的跳转地址，带 token，会过期。
+    """
+    result: list[dict[str, Any]] = []
+    keywords = getattr(config, "WECHAT_SEARCH_KEYWORDS", [])[:3]
+    if not keywords:
+        return result
+
+    for keyword in keywords:
+        try:
+            response = requests.get(
+                SOGOU_WEIXIN_URL,
+                params={"type": 2, "query": keyword, "ie": "utf8"},
+                headers={**BROWSER_HEADERS, "Referer": "https://weixin.sogou.com/"},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            html = response.text
+        except requests.RequestException as exc:
+            print(f"  微信搜索抓取失败({keyword}): {exc}")
+            continue
+
+        if "请输入验证码" in html or "antispider" in html:
+            print(f"  微信搜索触发验证码，跳过剩余关键词（{keyword}）")
+            break
+
+        for block in re.findall(r'<div class="txt-box">(.*?)</li>', html, re.S)[:limit]:
+            title_match = re.search(r"<h3>\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
+            if not title_match:
+                continue
+            title = _clean_text(title_match.group(2), 120)
+            if not title:
+                continue
+            desc_match = re.search(r'<p class="txt-info"[^>]*>(.*?)</p>', block, re.S)
+            account_match = re.search(r'<span class="all-time-y2">(.*?)</span>', block, re.S)
+            link = unescape(title_match.group(1)).replace("&amp;", "&")
+            if link.startswith("/"):
+                link = "https://weixin.sogou.com" + link
+            account = _clean_text(account_match.group(1), 30) if account_match else ""
+            result.append({
+                "title": title,
+                "desc": _clean_text(desc_match.group(1)) if desc_match else "",
+                "url": link,
+                # 搜狗不给阅读量，用不到热度，排 0 避免虚高
+                "hot": 0,
+                "source": f"公众号·{account}" if account else "公众号搜索",
+            })
+        if len(result) >= limit:
+            break
+
+    return result[:limit]
 
 
 def fetch_github(limit: int = 5, days: int = 7) -> list[dict[str, Any]]:
@@ -215,13 +522,35 @@ def relevance_score(title: str) -> int:
     return score
 
 
+def enabled_hot_sources() -> list[tuple[str, Any]]:
+    """返回当前启用的热榜源，顺序即抓取与优先级顺序。
+
+    排序依据是"能不能写出深度稿"：有真实摘要的（知乎/百度/微博/微信）在前，
+    只有标题的（B站/抖音/快手/头条）在后——下游按这个顺序取，
+    带摘要的先用，标题类的只在素材不够时兜底。
+    """
+    sources: list[tuple[str, Any]] = [("知乎热榜", fetch_zhihu), ("百度热搜", fetch_baidu)]
+    if getattr(config, "USE_WEIBO_TOPICS", True):
+        sources.append(("微博热搜", fetch_weibo))
+    if getattr(config, "USE_WECHAT_SEARCH", True):
+        sources.append(("公众号搜索", fetch_wechat_search))
+    if getattr(config, "USE_BILIBILI_TOPICS", True):
+        sources.append(("B站热搜", fetch_bilibili))
+    if getattr(config, "USE_DOUYIN_TOPICS", True):
+        sources.append(("抖音热榜", fetch_douyin))
+    if getattr(config, "USE_KUAISHOU_TOPICS", True):
+        sources.append(("快手热榜", fetch_kuaishou))
+    sources.append(("头条热榜", fetch_toutiao))
+    return sources
+
+
 def collect(limit: int, require_desc: bool = True) -> list[dict[str, Any]]:
-    """抓所有热榜并按相关分排序，只返回相关的前 limit 条。
+    """抓所有已启用的热榜并按相关分排序，只返回相关的前 limit 条。
 
     每条带 score（相关分）、hot（热度）、desc（真实摘要）、url（原文链接）。
 
     require_desc=True（默认）时只返回带真实摘要的条目。
-    头条热榜接口只给标题、不给摘要，这类条目会被滤掉——
+    抖音/快手/B站/头条这几个接口只给标题、不给摘要，这类条目会被滤掉——
     因为"只有标题"写出来的稿子必然是空泛套话，宁可不要。
     需要用标题级热点兜底时传 False。
     """
@@ -229,8 +558,11 @@ def collect(limit: int, require_desc: bool = True) -> list[dict[str, Any]]:
         return []
 
     raw: list[dict[str, Any]] = []
-    raw.extend(fetch_toutiao())
-    raw.extend(fetch_baidu())
+    for _name, fetcher in enabled_hot_sources():
+        try:
+            raw.extend(fetcher())
+        except Exception as exc:  # noqa: BLE001 - 单源异常不能拖垮整个选题流程
+            print(f"  选题源 {_name} 异常: {exc}")
 
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -332,11 +664,13 @@ def fetch_dailyhot(limit: int = 10, timeout: int = 8) -> list[dict[str, Any]]:
 def source_health(timeout: int = 10) -> list[dict[str, Any]]:
     """逐个探测选题源，返回每个源的状态。"""
     checks: list[tuple[str, Any]] = [
-        ("头条热榜", lambda: fetch_toutiao(timeout)),
-        ("百度热搜", lambda: fetch_baidu(timeout)),
+        (name, (lambda f=fetcher: f(timeout=timeout)))
+        for name, fetcher in enabled_hot_sources()
+    ]
+    checks.extend([
         ("掘金热榜", lambda: fetch_juejin(5, timeout)),
         ("GitHub 热门", lambda: fetch_github(5)),
-    ]
+    ])
     if getattr(config, "USE_DAILYHOT", False):
         checks.append(("DailyHot 聚合", lambda: fetch_dailyhot(5, timeout)))
 

@@ -173,11 +173,12 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     """抓选题，返回带来源的信息。
 
     国内源优先、且"有真实素材优先"的分层策略：
-      1. 全网热榜（百度，带真实摘要）技术话题：约 40%
+      1. 全网多平台热榜（知乎/百度/微博/公众号/B站/抖音/快手/头条）里技术话题：约 50%
+         （公众号搜索结果最多留 1 条——那是同行写过的稿，多了就是洗稿）
       2. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）：轮转补齐
       3. DailyHot 聚合源（可选，默认关）：补带摘要的跨平台热榜，约 20%
       4. 掘金技术热榜：只有标题，仅在有素材的源不足时兜底 1 条
-      5. 全网热榜里只有标题的条目（头条）：再兜底
+      5. 全网热榜里只有标题的条目（抖音/快手/B站/头条）：再兜底
       6. GitHub 热门：境外站不稳，最后兜底
       7. 备用领域词保底
     每条含 {title, desc, url, source, hot}，供审核页展示与 AI 基于事实写作。
@@ -198,10 +199,17 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
             items.append(candidate)
             added += 1
 
-    # 1. 全网热榜技术话题：约 40%，至少 1 条
-    #    只取带真实摘要的条目（头条只有标题，写出来必然空泛，故不用）
-    hot_quota = max(1, round(limit * 0.4))
-    take(hot_topics.collect(max(limit * 2, 6), require_desc=True), hot_quota)
+    # 1. 全网热榜技术话题：约 50%，至少 2 条
+    #    只取带真实摘要的条目（抖音/快手只有标题，写出来必然空泛，故不用）
+    hot_quota = max(2, round(limit * 0.5))
+    hot_candidates = hot_topics.collect(max(limit * 2, 6), require_desc=True)
+    # 公众号搜索结果全是"同行已经写过的稿"，命中最稳但最容易变成洗稿，
+    # 所以只留 1 条当角度参考，其余位置让给知乎/百度这类"事件本身"的源
+    wechat_rows = [x for x in hot_candidates if str(x.get("source", "")).startswith("公众号")]
+    other_rows = [
+        x for x in hot_candidates if not str(x.get("source", "")).startswith("公众号")
+    ]
+    take(other_rows + wechat_rows[:1], hot_quota)
 
     # 2. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）：轮转补齐
     take(_fetch_rss_items(limit), limit)
@@ -260,7 +268,7 @@ def _call_model(prompt: str, model: str) -> tuple[str | None, str]:
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=120,
+            timeout=getattr(config, "AI_TIMEOUT", 240),
         )
         if response.status_code == 429:
             return None, "ratelimit"
@@ -294,10 +302,29 @@ def call_ai(prompt: str) -> str | None:
     return None
 
 
+def material_grade(desc: str) -> str:
+    """按素材厚度分档：rich / thin / title_only。
+
+    决定能写多长、能写多深。以前只有"有摘要/没摘要"两档，
+    结果 20 字摘要也被当成充足素材，写出来既短又空。
+    """
+    text = (desc or "").strip()
+    if len(text) >= 150:
+        return "rich"
+    if len(text) >= 40:
+        return "thin"
+    return "title_only"
+
+
+def word_count(body: str) -> int:
+    """统计正文可见字数（去掉标签，不计标点后的空白）。"""
+    return len(re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", body)))
+
+
 def build_prompt(item: dict[str, Any]) -> str:
     """基于真实素材拼提示词，并要求 AI 不得编造事实。
 
-    关键区分：有摘要 vs 只有标题。
+    关键区分：素材厚 / 薄 / 只有标题。
     只有标题时 AI 无从得知事件经过，若仍按"新闻解读"写就必然编造，
     因此改成只写"概念澄清 + 应对方法"，并明确禁止描述任何经过和场景。
     """
@@ -306,19 +333,28 @@ def build_prompt(item: dict[str, Any]) -> str:
     source = item.get("source", "实时热榜")
     url = item.get("url", "").strip()
 
-    if desc:
-        material = f"真实新闻摘要（来自{source}）：\n{desc}"
-        task = "请围绕下面的真实话题写一篇解读文章。"
-        length_rule = "2. 正文 600-900 字，素材少就写短，不要注水"
-    else:
+    grade = material_grade(desc)
+    low, high = config.ARTICLE_WORDS[grade]
+    length_rule = (
+        f"2. 正文 {low}-{high} 字。字数靠「合法展开」那五条把每节写满，"
+        "不是靠形容词和排比句灌水"
+    )
+
+    if grade == "title_only":
         material = (
             f"该话题来自{source}，只有标题、没有任何正文素材。\n"
             "因此本文只写两件事：这个概念/现象是什么，普通人该怎么看待和应对。\n"
             "绝对不要描述事件经过——不要写谁做了什么、发生在哪里、涉及多少人或多钱，"
             "这些信息你都没有，写出来就是编造。"
         )
-        task = "请围绕下面的真实话题写一篇分析文章。"
-        length_rule = "2. 正文 400-700 字（素材有限，不要为凑字数编内容）"
+    else:
+        material = f"真实新闻摘要（来自{source}）：\n{desc}"
+        if grade == "thin":
+            material += (
+                "\n（素材偏短，事件本身的信息就这么多。"
+                "把篇幅放在机制解释、判断标准和操作路径上，不要替素材补经过。）"
+            )
+    task = "请围绕下面的真实话题写一篇解读文章。"
 
     source_line = f"\n原文链接：{url}" if url else ""
 
@@ -338,7 +374,8 @@ def build_prompt(item: dict[str, Any]) -> str:
         "禁止写'技术实力雄厚''团队经验丰富''市场需求旺盛'这类没有依据的归因，"
         "宁可直说'具体原因未披露'\n"
         "5. 如果有原文链接，在文末用「信息来源」标注出处\n"
-        "6. 素材撑不满时宁可写短，绝不用编造的内容凑字数\n\n"
+        "6. 篇幅不够时按「怎么把文章写厚而不注水」那五条展开，"
+        "绝不靠编造事实或堆形容词凑字数\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
         f"{config.TITLE_RULE}\n"
         f"{length_rule}\n"
@@ -377,6 +414,7 @@ def build_optimize_prompt(article: dict[str, Any]) -> str:
             "这些信息你都没有，写出来就是编造。"
         )
     source_line = f"\n原文链接：{url}" if url else ""
+    low, high = config.ARTICLE_WORDS[material_grade(desc)]
 
     return (
         f"你是资深内容编辑。下面这篇文章已发布过，现在要基于同一真实素材"
@@ -400,7 +438,7 @@ def build_optimize_prompt(article: dict[str, Any]) -> str:
         "优化要求：\n"
         "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
         "2. 开头结论更干脆，中段分点更可执行，结尾行动清单更具体\n"
-        "3. 全文 800-1200 字，不要空话套话和营销腔\n\n"
+        f"3. 全文 {low}-{high} 字，不要空话套话和营销腔\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
         f"{config.TITLE_RULE}\n"
         "2. 小标题用两个井号加一个空格开头，格式严格为：## 小标题文字\n"
@@ -455,6 +493,15 @@ def markdown_to_html(text: str) -> str:
         text = re.sub(r"</?[hH][1-6]>", "", text)
         return text.strip()
 
+    def clean_heading(text: str) -> str:
+        """小标题里不许有加粗。
+
+        模型很爱写 `## **变革难点一：组织结构**`，在公众号里等于标题又粗又带星号，
+        而且会把加粗次数顶到十几处。小标题本身就是视觉重点，不需要再加粗。
+        """
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        return re.sub(r"</?strong>", "", text).strip()
+
     def flush_code() -> None:
         nonlocal in_code, code_lines
         if in_code:
@@ -508,7 +555,7 @@ def markdown_to_html(text: str) -> str:
         if matched_title:
             close_list()
             level, text = matched_title
-            html_lines.append(f"<{level}>{clean(text)}</{level}>")
+            html_lines.append(f"<{level}>{clean_heading(text)}</{level}>")
             continue
 
         # 列表项：- / － / * / 1. / 1、开头
@@ -675,6 +722,60 @@ def tidy_spaces(body: str) -> str:
     return re.sub(rf"(?<=[{cjk}])[ \u3000]+(?=[{cjk}])", "", body)
 
 
+def unwrap_paragraph_bold(body: str, keep: int = 5) -> str:
+    """把"整段只有一句加粗"的段落拆掉加粗。
+
+    骨架要求加粗句和后面正文连成一段，模型却偏爱把结论单独甩一行加粗。
+    在公众号里那等于凭空多出一排小标题，读者扫下来全是重点，等于没有重点
+    （实测一篇稿子 9 处加粗，5 处是这种整段加粗）。
+    只在总数超过 keep 时动手，从最前面开始拆，保证不少于 keep 处。
+    """
+    total = body.count("<strong>")
+    if total <= keep:
+        return body
+
+    budget = [total - keep]
+
+    def repl(match: "re.Match[str]") -> str:
+        if budget[0] <= 0:
+            return match.group(0)
+        budget[0] -= 1
+        return f"<p>{match.group(1)}</p>"
+
+    return re.sub(
+        r"<p>\s*<strong>(.*?)</strong>\s*</p>", repl, body, flags=re.S
+    )
+
+
+def shorten_title(title: str, limit: int = 22) -> str:
+    """标题超长时在中文标点处断开，只留前半句。
+
+    公众号分享卡片大约 22 字就截断，"腾讯姚顺雨主导 AI 架构精简，而全公司 11 万人
+    面临大调整，这类扁平化变革落地难点在哪？"这种 46 字标题，读者根本看不到重点。
+    只在标点处切（保住语义），切出来不足 10 字就放弃，宁可交人工也不切出半句话。
+    """
+    text = re.sub(r"<[^>]+>", "", title).strip()
+    if len(text) <= limit:
+        return text
+    for sep in ("：", "，", "、", "；", "？", "?", "！"):
+        head = text.split(sep)[0].strip()
+        if 8 <= len(head) <= limit:
+            return head
+    return text
+
+
+def drop_title_heading(body: str, title: str) -> str:
+    """删掉和标题重复的第一个小标题。
+
+    模型常把标题又原样写成第一个 ## 小标题，粘到公众号上就是"标题、标题"连着出现两遍。
+    """
+    clean = re.sub(r"<[^>]+>", "", title).strip()
+    first = re.match(r"\s*<h2>(.*?)</h2>", body, re.S)
+    if first and re.sub(r"<[^>]+>", "", first.group(1)).strip() == clean:
+        return body[first.end():].lstrip()
+    return body
+
+
 def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
     """从 AI 输出里拆出标题和正文，并把 Markdown 转成 HTML。"""
     lines = raw.strip().splitlines()
@@ -687,17 +788,25 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
             title = first
             body_lines = lines[1:]
 
-    body = markdown_to_html("\n".join(body_lines))
-    return title, tidy_spaces(ensure_bold(split_long_paragraphs(body)))
+    title = shorten_title(title)
+    body = drop_title_heading(markdown_to_html("\n".join(body_lines)), title)
+    return title, tidy_spaces(
+        strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+    )
 
 
-def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
+def structure_issues(
+    body: str, title: str = "", desc: str = "", min_words: int = 0
+) -> list[str]:
     """检查成稿是否符合结构模板，只报会毁掉可读性的硬伤。
 
     实测模型会稳定犯这几类毛病：小标题写成"什么情况？""该怎么办？"、凑出五个小节、
     开头一律"近日，某某公司……"、结尾一律"综上所述"、把 300 字塞成一块、
     通篇加粗。这里做代码层校验，不合格就让模型带问题清单重写一次，
     比单纯在提示词里求它守规矩可靠。
+
+    min_words：正文最低字数。用户反馈"文章有点短"，光在提示词里写字数是拦不住的，
+    必须在代码层量一遍——模型说写了 1500 字，实际常常只有 700。
     """
     issues: list[str] = []
 
@@ -747,6 +856,19 @@ def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
     elif bold_count > 8:
         issues.append(f"加粗 {bold_count} 处太多，重点被稀释")
 
+    # 篇幅：太短说明没讲透。这条是给"文章有点短"兜底的硬校验
+    total_words = word_count(body)
+    if min_words and total_words < min_words:
+        issues.append(f"正文只有 {total_words} 字，低于 {min_words} 字，内容太薄")
+
+    # 分节字数：三节各写一百多字，等于把一个观点拆成三份，读者拿不到增量
+    if len(heads) >= 2:
+        sections = re.split(r"<h2>.*?</h2>", body, flags=re.S)[1:]
+        for index, section in enumerate(sections, 1):
+            section_words = word_count(section)
+            if section_words < config.SECTION_MIN_WORDS:
+                issues.append(f"第 {index} 节只有 {section_words} 字，写得太敷衍")
+
     # 代码块里冒出配置文件语法（带分号或大括号），但素材从没给过——这是在教人改配置，
     # 写错一行就能把服务搞挂，比不写更糟。命令块一般不带分号，所以不会误伤
     for block in re.findall(r"<pre><code>(.*?)</code></pre>", body, re.S):
@@ -766,6 +888,22 @@ def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
     empty_phrases = ["及时更新", "引起重视", "加强安全意识", "值得关注", "至关重要"]
     if sum(1 for phrase in empty_phrases if phrase in body) >= 2:
         issues.append("空话套话过多")
+
+    # 模板化排比："对普通用户而言……对从业者而言……对小团队而言……"
+    # 这是模型凑字数最常用的手段：换三次主语把同一句话重说一遍，读者一个字都拿不到。
+    # 扩写实测一次就冒出 9 处，字数上去了，稿子也废了，必须拦在代码层。
+    template_hits = len(re.findall(r"对[^，。；：]{2,6}而言", plain))
+    if template_hits >= 3:
+        issues.append(f"出现 {template_hits} 处「对…而言」排比，是在套模板凑字")
+
+    # 填充词密度：单个出现很正常，扎堆就是注水
+    filler_words = (
+        "有助于", "促进", "具有重要意义", "发挥重要作用", "提供有力支撑",
+        "注入新动能", "迈上新台阶", "筑牢", "夯实",
+    )
+    filler_hits = sum(plain.count(word) for word in filler_words)
+    if filler_hits >= 4:
+        issues.append(f"填充词出现 {filler_hits} 次，内容在注水")
 
     # 9.2 分说成"满分"是硬伤，懂行的人一眼就看穿（两轮实测都出现过）
     if "满分" in plain and "满分" not in desc and "10.0" not in desc:
@@ -803,6 +941,160 @@ def structure_issues(body: str, title: str = "", desc: str = "") -> list[str]:
     return issues
 
 
+def body_to_text(body: str) -> str:
+    """把成稿 HTML 还原成带 Markdown 标记的纯文本，供扩写提示词使用。"""
+    text = re.sub(r"<h2>(.*?)</h2>", r"\n## \1\n", body, flags=re.S)
+    text = re.sub(
+        r"<pre><code>(.*?)</code></pre>",
+        lambda m: "\n```\n" + m.group(1) + "\n```\n",
+        text,
+        flags=re.S,
+    )
+    text = re.sub(r"<strong>(.*?)</strong>", r"**\1**", text, flags=re.S)
+    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.S)
+    text = re.sub(r"</p>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def section_word_counts(body: str) -> list[int]:
+    """按小标题切段，返回每节的可见字数（不含第一节之前的开头）。"""
+    sections = re.split(r"<h2>.*?</h2>", body, flags=re.S)[1:]
+    return [word_count(section) for section in sections]
+
+
+def build_expand_prompt(
+    title: str, body: str, item: dict[str, Any], min_words: int
+) -> str:
+    """扩写提示词：同一素材把稿子写厚，只许补解释，不许补事实。
+
+    为什么单独写一个提示词而不是让模型"重写一遍"：
+    重写会换角度、换观点，读者看到的是另一篇文章；扩写保留原稿的判断和结构，
+    只在每节内部把"为什么""对谁有影响""怎么判断""怎么做"讲透。
+    """
+    desc = (item.get("desc") or "").strip()
+    grade = material_grade(desc)
+    low, high = config.ARTICLE_WORDS[grade]
+    material = desc if desc else "（本题只有标题，没有任何正文素材）"
+    counts = section_word_counts(body)
+    detail = "、".join(f"第 {i} 节 {n} 字" for i, n in enumerate(counts, 1)) or "暂无小标题"
+    current = word_count(body)
+
+    return (
+        "你是资深编辑。下面这篇稿子事实没问题，但写得太薄，读者会觉得没讲透。\n"
+        f"当前全文 {current} 字（{detail}），请扩写到 {low}-{high} 字，不得少于 {min_words} 字。\n"
+        "**先把每节补到 300 字以上再动全文**；某一节信息确实不够，就把两节并成一节，"
+        "另起一节写判断标准或操作路径，小标题仍然是 3 个。\n\n"
+        "扩写红线（违反即作废）：\n"
+        "1. 原稿里的事实、数字、版本号、人名、机构、链接一律保留，一个字都不许改\n"
+        "2. 不许新增任何具体事件经过、金额、时间、地点、数据——素材里没有的绝对不能写\n"
+        "3. 不许为了凑字数编例子。想举例只能用'假设''如果'开头的假设句，不能写成发生过的事\n"
+        "4. 保留原有小标题和整体结构，在每节内部补充 1-2 段；小标题最多 4 个\n"
+        "5. 不许用排比、宏大形容词、'值得注意的是''不难发现'这类填充句\n"
+        "6. **禁止套模板**：不要出现'对普通用户而言''对从业者而言''对小团队而言'"
+        "这种把读者硬分成三类的排比，也不要每节都写成'影响 + 意义 + 建议'三连。\n"
+        "7. 全文加粗总共不超过 5 处，扩写不许新增加粗\n\n"
+        "补什么由你判断，从下面挑真正适合这一篇的（挑 2-3 类就够，不要逐条套）：\n"
+        "· 影响分岔：这件事对不同处境的人结论不一样，说清哪类人该动、哪类人可以等；\n"
+        "· 判断标准：给出可以自己对照的分界线，让人知道自己落在哪一边；\n"
+        "· 机制解释：用通用原理说明它为什么成立、什么条件下会失效；\n"
+        "· 常见误解：多数人的第一反应是什么，那个反应错在哪；\n"
+        "· 操作路径：从哪一步开始，做完怎么验证。\n"
+        "**每补一段都要有新信息。写不出新信息就保持原长度，宁可短，不要用'有助于''促进''具有重要意义'"
+        "这类词把句子撑长——那种段落读者一眼就能看出是凑的。**\n\n"
+        f"话题：{item.get('title') or title}\n"
+        f"唯一素材来源（{item.get('source', '热榜')}）：{material}\n\n"
+        "原稿：\n"
+        f"{body_to_text(body)}\n\n"
+        "输出要求：第一行是标题，然后直接是正文。不要写'以下是扩写版本'之类的说明，"
+        "不要输出解释性文字。小标题用 ## 开头，需要强调的句子用**这样**加粗，每节最多一句。"
+    )
+
+
+def is_length_issue(issue: str) -> bool:
+    """判断一条问题是不是"只是字数不够"，而不是结构硬伤。
+
+    只有纯字数问题才值得扩写。稿子要是没小标题、标题 46 字、五节各一百字，
+    扩写只会把毛病放大——那种必须回炉重写或直接交人工。
+    """
+    return issue.startswith("正文只有") or bool(re.match(r"第 \d+ 节只有", issue))
+
+
+# 扩写前必须清零的硬伤。这类问题在扩写里改不好，只会被写得更长更乱。
+# 注意「结尾没有动作」「加粗不足」不在此列——那两条扩写时顺手就修了，
+# 拿它们卡扩写，会让"只差字数"的稿子白白停在 600 字。
+HARD_ISSUE_MARKERS = (
+    "没有小标题", "超过 4 个", "设问句", "素材未提供", "重复复述",
+    "新闻体", "套模板", "注水", "标题", "评分说成",
+)
+
+
+def has_hard_issue(issues: list[str]) -> bool:
+    """是否还有扩写解决不了的硬伤。"""
+    return any(
+        not is_length_issue(x) and any(m in x for m in HARD_ISSUE_MARKERS)
+        for x in issues
+    )
+
+
+def strip_meta_notes(body: str) -> str:
+    """删掉模型写进正文的自我说明。
+
+    弱模型遇到被截断的素材会补一句「（此处原文中断，未给出完整内容）」，
+    有时还会加一行「以下是扩写后的版本」。这些既不是内容也不是给读者的提示，
+    粘到公众号上非常难看，代码层直接清掉。
+    """
+    body = re.sub(r"[（(]\s*此处原文中断[^）)]*[）)]", "", body)
+    body = re.sub(
+        r"<p>\s*(以下|下面)是[^<]{0,24}(扩写|改写|优化|版本|正文)[^<]*</p>", "", body
+    )
+    return body
+
+
+def expand_article(
+    title: str, body: str, item: dict[str, Any], min_words: int
+) -> tuple[str, str] | None:
+    """扩写一次，返回 (标题, 正文)；没变长、变注水或调用失败返回 None。
+
+    只在"结构已经合格但字数不够"时调用——结构都不对的稿子，扩写只会把毛病放大。
+    验收卡四道：结构只差字数、字数必须增加、不能超过上限、不能引入新毛病。
+    踩过的坑：第一次只比字数，模型把 1062 字灌到 1327 字却塞进 9 处"对…而言"排比；
+    第二次弱模型一口气冲到 2034 字，还写出"（此处原文中断，未给出完整内容）"这种 meta 话。
+    """
+    desc = (item.get("desc") or "").strip()
+    grade = material_grade(desc)
+    upper = int(config.ARTICLE_WORDS[grade][1] * 1.2)
+    before = word_count(body)
+    before_issues = structure_issues(body, title, desc, min_words)
+    if has_hard_issue(before_issues):
+        print("  仍有结构硬伤，跳过扩写（扩写只会放大毛病）")
+        return None
+
+    raw = call_ai(build_expand_prompt(title, body, item, min_words))
+    if not raw:
+        return None
+    new_title, new_body = parse_response(raw, title)
+    after = word_count(new_body)
+    if after <= before:
+        print(f"  扩写没有变长（{before} → {after} 字），保留原稿")
+        return None
+    if after > upper:
+        print(f"  扩写冲过头（{after} 字 > 上限 {upper} 字），保留原稿")
+        return None
+
+    after_issues = structure_issues(new_body, new_title, desc, min_words)
+    watered = [x for x in after_issues if "套模板" in x or "注水" in x]
+    if watered:
+        print(f"  扩写注入空话（{'；'.join(watered)}），保留原稿")
+        return None
+    if len(after_issues) > len(before_issues):
+        print(f"  扩写引入 {len(after_issues) - len(before_issues)} 处新问题，保留原稿")
+        return None
+
+    print(f"  扩写：{before} → {after} 字，问题 {len(before_issues)} → {len(after_issues)}")
+    return new_title, new_body
+
+
 def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
     """生成一个稿件条目，记录真实来源，绝不编造正文。"""
     topic = topic_item["title"]
@@ -815,6 +1107,8 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         body = build_factual_card(topic_item)
         mode = "真实素材卡"
     else:
+        # 按素材厚度定字数门槛：厚素材要求长，只有标题的反而不能长（长了必注水）
+        min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
         prompt = build_prompt(topic_item)
         raw = call_ai(prompt)
         if raw is None:
@@ -827,23 +1121,38 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
             mode = "AI 改写"
 
             # 结构不合格：把问题清单回灌给模型，重写一次（只重试一次，控成本）
-            issues = structure_issues(body, title, desc)
+            issues = structure_issues(body, title, desc, min_words)
             if issues:
                 print(f"  结构自检未过：{'、'.join(issues)} → 重写一次")
                 fix_prompt = (
                     f"{prompt}\n\n"
                     f"你上一版存在这些问题：{'；'.join(issues)}。\n"
                     "请严格按上面的结构模板重写全文：小标题必须是陈述句、"
-                    "数量控制在 3 个、每节第一句加粗、去掉空话套话。"
+                    "数量控制在 3 个、每节第一句加粗、每节写到 300 字以上、"
+                    "去掉空话套话。"
                 )
                 raw2 = call_ai(fix_prompt)
                 if raw2:
                     title2, body2 = parse_response(raw2, topic)
-                    if len(structure_issues(body2, title2, desc)) < len(issues):
+                    if len(structure_issues(body2, title2, desc, min_words)) < len(issues):
                         title, body = title2, body2
 
             # 重试也未必改得掉，最后统一把编造的配置行剥一次
             body = strip_unsafe_config(body, desc)
+
+            # 重写一遍还是偏短：换扩写（同一判断、同一素材，只把每节讲透）
+            # 先确认剩下的问题只有字数——结构还有硬伤时扩写只会放大毛病，直接交人工
+            remaining = structure_issues(body, title, desc, min_words)
+            if word_count(body) < min_words and not has_hard_issue(remaining):
+                # 最多两次：第一次常因模型"顺手压缩"而变短，第二次带着每节字数再试
+                for _ in range(2):
+                    if word_count(body) >= min_words:
+                        break
+                    expanded = expand_article(title, body, topic_item, min_words)
+                    if not expanded:
+                        continue
+                    title, body = expanded
+                    body = strip_unsafe_config(body, desc)
 
     return {
         "id": uuid.uuid4().hex[:12],
@@ -883,6 +1192,16 @@ def optimize_article(article_id: str) -> dict[str, Any] | None:
         return None
 
     new_title, new_body = parse_response(raw, article.get("title", "优化稿件"))
+
+    # 优化后仍然偏短：同素材扩写一次（和初稿走同一套规则，不多一个特例）
+    desc = (article.get("desc") or "").strip()
+    min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
+    if word_count(new_body) < min_words:
+        expanded = expand_article(new_title, new_body, article, min_words)
+        if expanded:
+            new_title, new_body = expanded
+    new_body = strip_unsafe_config(new_body, desc)
+
     article["title"] = new_title
     article["body"] = new_body
     article["mode"] = "AI优化重写"
@@ -1000,6 +1319,51 @@ def run(count: int, demo: bool) -> list[dict[str, Any]]:
     return created
 
 
+def expand_pending(limit: int = 0) -> int:
+    """把队列里偏短的待审稿扩写一遍，返回实际改写的篇数。
+
+    为什么要单独一个命令：用户反馈"提交审核的文章有点短"时，
+    队列里已经攒了一批 600-800 字的旧稿。规则改了只影响新稿，
+    旧稿得回填一次。只动 pending（待审）的，已通过/已发布的一律不碰——
+    那些可能已经发出去了，改了也对不上。
+    """
+    queue = load_queue()
+    targets = [
+        article for article in queue
+        if article.get("status") == "pending"
+        and word_count(article.get("body", "")) < config.ARTICLE_MIN_WORDS[
+            material_grade(article.get("desc", ""))
+        ]
+    ]
+    targets.sort(key=lambda a: word_count(a.get("body", "")))
+    if limit:
+        targets = targets[:limit]
+    if not targets:
+        print("没有偏短的待审稿")
+        return 0
+
+    changed = 0
+    for article in targets:
+        before = word_count(article.get("body", ""))
+        desc = article.get("desc", "")
+        min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
+        print(f"· {article['title'][:26]}（{before} 字 → 目标 {min_words}+）")
+        result = expand_article(article.get("title", ""), article["body"], article, min_words)
+        if not result:
+            continue
+        title, body = result
+        article["title"] = title
+        article["body"] = strip_unsafe_config(body, desc)
+        article["mode"] = "AI扩写"
+        article["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        changed += 1
+
+    if changed:
+        save_queue(queue)
+    print(f"完成：{changed}/{len(targets)} 篇已扩写")
+    return changed
+
+
 def main() -> None:
     """解析命令行参数并运行。"""
     parser = argparse.ArgumentParser(description="自动化内容流水线")
@@ -1019,10 +1383,21 @@ def main() -> None:
         action="store_true",
         help="只清理过期稿件，不生成新稿",
     )
+    parser.add_argument(
+        "--expand",
+        type=int,
+        nargs="?",
+        const=0,
+        default=None,
+        metavar="N",
+        help="把偏短的待审稿扩写一遍（可指定最多 N 篇，不填=全部）",
+    )
     args = parser.parse_args()
 
     if args.cleanup:
         run_cleanup()
+    elif args.expand is not None:
+        expand_pending(args.expand)
     else:
         run(args.count, args.demo)
 
