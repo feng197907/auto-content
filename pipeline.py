@@ -408,11 +408,17 @@ def build_prompt(item: dict[str, Any]) -> str:
     )
 
 
-def build_optimize_prompt(article: dict[str, Any]) -> str:
+def build_optimize_prompt(
+    article: dict[str, Any], issues: list[str] | None = None
+) -> str:
     """基于稿件里保存的真实素材，构建"重写优化"提示词。
 
     与首次生成不同：明确告诉模型这是二次优化，要用同一真实素材写出
     质量更高的一版，但真实性红线不变（不得编造数字/人名/时间/事件）。
+
+    issues：上一版的代码自检问题清单。原稿有什么毛病必须明说，否则模型
+    只会在旧稿基础上换措辞，同样的病照犯（2026-11-20 实测：同一句话被当成
+    三个小节的结论句，不提它就再犯一次）。
     """
     topic = article.get("topic") or article.get("title", "")
     desc = (article.get("desc") or "").strip()
@@ -461,7 +467,15 @@ def build_optimize_prompt(article: dict[str, Any]) -> str:
         "4. 命令、配置片段用三个反引号单独包成代码块，一行一条命令\n"
         "5. 不要写导语说明、不要解释你的思路，直接输出标题和正文\n\n"
         f"{config.ARTICLE_SKELETON}\n"
-        "自检三问（写完自己过一遍）：\n"
+        + (
+            "旧稿存在的具体问题（这一版必须全部改掉）：\n"
+            + "\n".join(f"· {x}" for x in issues[:6])
+            + "\n特别是：每个小节的加粗首句必须是**这一节自己的结论**，"
+            "不许把同一句话换个地方反复当结论用。\n\n"
+            if issues
+            else ""
+        )
+        + "自检三问（写完自己过一遍）：\n"
         "· 标题里有没有具体信息点，让人一眼知道跟自己有关？\n"
         "· 开头三行之内，读者能不能看出'这事和我有什么干系'？\n"
         "· 读完有没有一个可以马上做的动作？如果全是'应当重视''要加强'，回去改。"
@@ -509,13 +523,21 @@ def markdown_to_html(text: str) -> str:
         return text.strip()
 
     def clean_heading(text: str) -> str:
-        """小标题里不许有加粗。
+        """小标题里不许有加粗，也不许残留 Markdown 标记。
 
         模型很爱写 `## **变革难点一：组织结构**`，在公众号里等于标题又粗又带星号，
         而且会把加粗次数顶到十几处。小标题本身就是视觉重点，不需要再加粗。
+
+        还有一种更隐蔽的：把标记写了两遍 `## ## 这种能力背后的核心逻辑`。
+        外层那个 `## ` 被当成分隔符吃掉了，里层的 `## ` 留在文字里，
+        发到公众号就显示成「## 这种能力背后的核心逻辑」（2026-11-20 线上实际撞到）。
+        所以行首的 # 要反复剥干净，行尾的闭合 #（`## 标题 ##` 写法）也一并去掉。
         """
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-        return re.sub(r"</?strong>", "", text).strip()
+        text = re.sub(r"</?strong>", "", text)
+        text = re.sub(r"^(?:#{1,6}\s*)+", "", text.strip())
+        text = re.sub(r"\s*#+$", "", text)
+        return text.strip()
 
     def flush_code() -> None:
         nonlocal in_code, code_lines
@@ -832,6 +854,59 @@ def drop_title_heading(body: str, title: str) -> str:
     return body
 
 
+def split_sentences(text: str, min_len: int = 12) -> list[str]:
+    """按中文句末标点切句，只保留够长的（短句重复不算毛病）。"""
+    return [
+        s.strip()
+        for s in re.split(r"(?<=[。！？!?])", text)
+        if len(s.strip()) >= min_len
+    ]
+
+
+def dedupe_repeated(body: str, min_times: int = 2) -> str:
+    """同一句话被写了多遍时兜底收敛，不改写任何文字。
+
+    实测（2026-11-20 线上撞到）：模型把"通用模型直接驱动机器人正在从实验走向落地。"
+    这一句既当正文第二段的结论，又在三个小节各当一次「加粗首句」，全文出现 4 次。
+    读者看到的是同一句被反复强调——等于三个小节都没有自己的结论。
+
+    只做两件绝对安全的事：
+      1. 整段只有这一句、且这句在别处也出现 → 删掉整段（信息量为零，删了不亏）；
+      2. 同一句被加粗 3 次以上 → 第二次起去掉加粗，只强调一次。
+    真正"每节结论各不相同"只能靠 structure_issues 报出来让模型重写，代码改不了语义。
+    """
+    para_re = re.compile(r"<p(?:\s[^>]*)?>.*?</p>", re.S)
+    blocks = para_re.findall(body)
+    if not blocks:
+        return body
+
+    texts = [re.sub(r"<[^>]+>", "", b).strip() for b in blocks]
+    counts: dict[str, int] = {}
+    for text in texts:
+        for sent in split_sentences(text):
+            counts[sent] = counts.get(sent, 0) + 1
+    repeated = {s for s, n in counts.items() if n >= min_times}
+
+    # 1) 整段就是一句重复话：删掉
+    for block, text in zip(blocks, texts):
+        if text and text in repeated:
+            body = body.replace(block, "", 1)
+
+    # 2) 加粗重复：只强调第一次
+    seen_bold: set[str] = set()
+
+    def fix_bold(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        if counts.get(inner, 0) >= 3:
+            key = re.sub(r"\s+", "", inner)
+            if key in seen_bold:
+                return inner
+            seen_bold.add(key)
+        return match.group(0)
+
+    return re.sub(r"<strong>(.+?)</strong>", fix_bold, body)
+
+
 def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
     """从 AI 输出里拆出标题和正文，并把 Markdown 转成 HTML。"""
     lines = raw.strip().splitlines()
@@ -848,7 +923,9 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
     body = drop_title_heading(markdown_to_html("\n".join(body_lines)), title)
     return title, tidy_spaces(
         cap_bold(
-            strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+            dedupe_repeated(
+                strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+            )
         )
     )
 
@@ -892,6 +969,9 @@ def structure_issues(
         issues.append(f"小标题 {len(heads)} 个，超过 4 个")
     if any(re.search(r"[？?]\s*$", h) for h in heads):
         issues.append("小标题用了设问句")
+    # 小标题里残留 Markdown 标记：`## ## 标题` 会被转成「## 标题」显示在页面上
+    if any(re.search(r"^\s*#|#+\s*$|\*\*", h) for h in heads):
+        issues.append("小标题残留 Markdown 标记")
 
     # 开头钩子：新闻联播体一出现，读者三秒内就划走了
     if paragraphs:
@@ -984,10 +1064,15 @@ def structure_issues(
     ):
         issues.append("结尾没有给出动作或提问")
 
-    # 同一句话反复出现：模型常把加粗句单独成段，后面又原样复述一遍
+    # 同一句话反复出现：模型常把加粗句单独成段，后面又原样复述一遍；
+    # 更常见的是拿同一句当多个小节的结论（2026-11-20 实测一篇里同一句出现 4 次）。
+    # 报出次数和原句，模型才知道该改哪里——只说"有重复"它往往原样再写一遍。
     sentences = [s.strip() for s in re.split(r"[。！？!?]", plain) if len(s.strip()) >= 12]
-    if any(sentences.count(s) > 1 for s in sentences):
-        issues.append("有句子被重复复述")
+    if sentences:
+        worst_sent = max(set(sentences), key=sentences.count)
+        times = sentences.count(worst_sent)
+        if times > 1:
+            issues.append(f"有句子被重复复述 {times} 次（{worst_sent[:18]}），同一个结论只讲一次")
 
     # 标题里的数字必须能在素材或正文里找到，防止"1000 亿"被写成"100 亿"
     if title and desc:
@@ -1227,12 +1312,20 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
     }
 
 
-def optimize_article(article_id: str) -> dict[str, Any] | None:
+def optimize_article(
+    article_id: str, max_retry: int = 1
+) -> dict[str, Any] | None:
     """基于原稿真实素材，用大模型重写一篇，覆盖当前稿件。
 
     - 保持 status=approved 与 approved_at 不变（不刷新 30 天保留期起算点）
-    - 只在 AI 成功返回后才写回，失败返回 None，原稿毫发无损
+    - 只在"重写结果确实更好"时才写回：AI 失败、或结构硬伤没修掉，一律返回 None，
+      原稿毫发无损
     - 成功返回更新后的稿件字典，供接口回显新标题/正文
+
+    为什么要卡结构再覆盖（2026-11-20 血的教训）：
+    原来只要 AI 返回就写回。实测一次重写，模型输出通篇没有小标题（整段铺陈），
+    覆盖后把一篇结构合格、已推草稿箱的稿子变成废物，只能从备份回滚。
+    重写比初稿更该被校验——初稿至少还走了一次 structure_issues 重试。
     """
     queue = load_queue()
     index = -1
@@ -1244,16 +1337,36 @@ def optimize_article(article_id: str) -> dict[str, Any] | None:
         return None
 
     article = queue[index]
-    raw = call_ai(build_optimize_prompt(article))
-    if raw is None:
-        # AI 失败/限流：不写回，原稿保持不变
-        return None
-
-    new_title, new_body = parse_response(raw, article.get("title", "优化稿件"))
-
-    # 优化后仍然偏短：同素材扩写一次（和初稿走同一套规则，不多一个特例）
+    # 先给旧稿做一次自检，把毛病明说给模型——不提的话它只在旧稿上换措辞，同样的病再犯一遍
     desc = (article.get("desc") or "").strip()
     min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
+    issues = structure_issues(
+        article.get("body", ""), article.get("title", ""), desc, min_words
+    )
+
+    new_title, new_body = article.get("title", ""), article.get("body", "")
+    for attempt in range(max_retry + 1):
+        raw = call_ai(build_optimize_prompt(article, issues))
+        if raw is None:
+            # AI 失败/限流：不写回，原稿保持不变
+            print("  重写失败（模型不可用），保留原稿")
+            return None
+
+        cand_title, cand_body = parse_response(raw, article.get("title", "优化稿件"))
+        left = structure_issues(cand_body, cand_title, desc, min_words)
+        hard = [x for x in left if not is_length_issue(x)]
+        if not hard:
+            new_title, new_body = cand_title, cand_body
+            break
+
+        print(f"  重写第 {attempt + 1} 次仍有结构硬伤：{'、'.join(hard)}")
+        if attempt == max_retry:
+            print("  重写不合格，保留原稿（不拿坏稿覆盖好稿）")
+            return None
+        # 带着这次的问题清单再要一版
+        issues = hard
+
+    # 优化后仍然偏短：同素材扩写一次（和初稿走同一套规则，不多一个特例）
     if word_count(new_body) < min_words:
         expanded = expand_article(new_title, new_body, article, min_words)
         if expanded:
