@@ -49,13 +49,34 @@ AI_PROVIDERS: dict[str, dict[str, str]] = {
         "key_env": "SILICONFLOW_API_KEY",
     },
     "deepseek": {
-        "name": "DeepSeek（低价，送 500 万 token）",
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "name": "DeepSeek（按量付费，flash 档最便宜）",
+        # 2026-11-20 对照官方文档核对过两个变化，老教程写的都是错的：
+        # ① base_url 不需要 /v1，SDK/手写请求都直接拼 /chat/completions；
+        # ② deepseek-chat 和 deepseek-reasoner 已于 2026-07-24 下线，
+        #    现在只剩 deepseek-flash（V4.1-Flash）和 deepseek-v4-pro 两个名字，
+        #    填旧名会返回 400 model not found。
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
+        # 故意不设备用模型：DeepSeek 的 429 只在并发超限时出现（2500 并发），
+        # 咱们每天 5 篇根本碰不到；而降级到 v4-pro 单价贵 4 倍多，
+        # 宁可这一篇失败退回素材卡，也不要限流时静默烧钱。
+        # 真要兜底，把下面改成 "deepseek-v4-pro" 即可。
+        "fallback_model": "",
         "key_env": "DEEPSEEK_API_KEY",
     },
 }
-AI_PROVIDER = "zhipu"  # 可选：zhipu / siliconflow / deepseek
+
+# 换平台不用改代码：在 .env 里写 AI_PROVIDER=deepseek 就行。
+# 写错名字不至于让服务起不来，打一行日志回退到默认的智谱。
+AI_PROVIDER = os.getenv("AI_PROVIDER", "zhipu")
+if AI_PROVIDER not in AI_PROVIDERS:
+    print(f"[config] AI_PROVIDER={AI_PROVIDER} 不认识，回退 zhipu（可选：{'/'.join(AI_PROVIDERS)}）")
+    AI_PROVIDER = "zhipu"
+
+# 深度思考开关。智谱 4.7 和 DeepSeek V4.1 都默认开启思考模式：
+# 写稿是"按模板把素材讲清楚"，不需要推理，开着只会更慢、更贵、还容易把思考过程写进正文。
+# 默认关；想让它先想再写就在 .env 里写 AI_THINKING=1。
+AI_THINKING = os.getenv("AI_THINKING", "0") == "1"
 
 _provider = AI_PROVIDERS[AI_PROVIDER]
 AI_BASE_URL = _provider["base_url"]

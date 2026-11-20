@@ -256,8 +256,13 @@ def _call_model(prompt: str, model: str) -> tuple[str | None, str]:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.8,
     }
-    # 智谱 4.7 默认开深度思考（慢且混入思考过程），显式关掉
-    if config.AI_PROVIDER == "zhipu" and "4.7" in model:
+    # 智谱 4.7 与 DeepSeek V4.1 都默认开深度思考（更慢、更费 token，
+    # 思考内容还可能混进正文）。写稿用不上推理，默认显式关掉；
+    # .env 里 AI_THINKING=1 可恢复默认行为。
+    if not getattr(config, "AI_THINKING", False) and (
+        (config.AI_PROVIDER == "zhipu" and "4.7" in model)
+        or config.AI_PROVIDER == "deepseek"
+    ):
         payload["thinking"] = {"type": "disabled"}
 
     try:

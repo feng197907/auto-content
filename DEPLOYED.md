@@ -348,3 +348,21 @@ crontab -l
   不会出现"没选题"或退回编造，故命中率低不需要改代码。
 
 > 回滚：`cd /opt/auto-content && cp -p .bak_20261120_1103/*.py . && cp -p .bak_20261120_1103/templates/* templates/ && systemctl restart auto-content`
+
+## 二十二、支持切 DeepSeek（2026-11-20，main）
+- 背景：智谱 4.7 早高峰限流，准备接 DeepSeek 兜底。
+- 修正两处会直接报 400 的旧配置（原值是 2026 年初的写法）：
+  - `base_url` 由 `https://api.deepseek.com/v1` 改为 `https://api.deepseek.com`（官方文档不再需要 `/v1`）。
+  - 模型名 `deepseek-chat` 已于 **2026-07-24 下线**，改为 `deepseek-flash`（V4.1-Flash）；
+    同批下线的还有 `deepseek-reasoner`。
+- `AI_PROVIDER` 改为读环境变量：`.env` 写 `AI_PROVIDER=deepseek` 即切换，不用改代码；
+  写错名字只打日志回退 zhipu，不会导致服务起不来。
+- 新增 `AI_THINKING`（默认 0）：DeepSeek V4.1 与智谱 4.7 都默认开深度思考，
+  写稿用不上推理，开着更慢更贵；默认在请求体里传 `thinking={"type":"disabled"}`。
+- DeepSeek 故意不设备用模型：429 只在 2500 并发时出现，日常碰不到；
+  降级到 `deepseek-v4-pro` 单价约 4 倍多，宁可单篇失败走素材卡。
+- 计费参考（2026-11 官方价，1M token）：`deepseek-flash` 闲时 $0.15 入 / $0.60 出，
+  忙时翻倍；忙时是 UTC 01:00-04:00 与 06:00-10:00（北京时间 09:00-12:00、14:00-18:00）。
+  **每天早上 8 点的 cron 正好落在闲时**（UTC 00:00），单价减半。
+- 验证：`AI_PROVIDER=deepseek` 下解析出 `https://api.deepseek.com/chat/completions`、
+  `model=deepseek-flash`、思考已关；智谱路径（4.7 关思考 / flash 不传）行为未变。
