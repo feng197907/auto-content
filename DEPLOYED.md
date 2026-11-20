@@ -489,3 +489,23 @@ crontab -l
 - 旧版草稿已 `draft/delete` 清掉，重推新版《OpenAI把机器人团队并了》，草稿箱现有 **1 条**。
 - 这属于测试推送，可在后台直接删除；确认排版无误后再正式发文。
 - 成本：本次 DeepSeek 兜底 1 次重写（4.7 早高峰 429），约 ¥0.05。
+
+## 二十七、审核后台端口改为可配置（2026-11-20，main）
+
+### 1) 起因：5000 端口被占，服务起不来
+- 新机上 `auto-content.service` 反复 `activating (auto-restart)`，`code=exited, status=1`；
+  而 `curl 127.0.0.1:5000` 返回 **302**——`app.py` 鉴权失败只会给 401 + Basic 头，绝不给 302，
+  说明应答的是另一个进程。
+- `ss -lntup` 定位：5000 被 **gunicorn**（另一台 Flask 应用，同机还有 mariadb、nginx 443、containerd）占着，
+  我方 `app.py` 绑不上端口即退出。
+
+### 2) 改法：端口走环境变量，不写死
+- `config.py`：`APP_HOST = os.getenv("APP_HOST", "0.0.0.0")`、`APP_PORT = int(os.getenv("APP_PORT") or 5000)`。
+  默认仍是 5000，老部署不受影响；同机端口冲突时在 `.env` 加 `APP_PORT=5001` 即可，代码与 git 都不脏。
+- `.env.example` 同步加 `APP_PORT=5000` 与「改端口要同步 nginx + REVIEW_URL」的说明。
+- 实测：不设 → 5000；`APP_PORT=5001` → 5001；设为空 → 回落 5000。
+
+### 3) 与既有业务隔离（重要）
+- 目标机 80/443 已被现有站点占用，`deploy/nginx.conf` 的 `server_name _; listen 80;` **不能直接套用**，
+  否则会抢默认站点。正确做法：独立 `listen 8080` 的 server 块 + `proxy_pass http://127.0.0.1:5001`。
+- 验收：`5001 → 401`（鉴权生效）；`8080 → 401`（反代通）；`publish.py --check` 四项全绿（token 取到即说明出口 IP 已在白名单）。

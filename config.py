@@ -346,8 +346,12 @@ FALLBACK_TOPICS: list[str] = [
 ]
 
 # ---- 审核后台 ----
-APP_HOST = "0.0.0.0"
-APP_PORT = 5000
+# 监听地址与端口。端口走环境变量，不写死：
+# 同一台机器上若已有别的项目占了 5000（实测撞到过 gunicorn 起的另一个 Flask 应用），
+# 在 .env 里加一行 APP_PORT=5001 即可，不用改代码、不用改 git。
+# 改端口时记得同步 nginx 的 proxy_pass 和 .env 里的 REVIEW_URL（要带端口）。
+APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
+APP_PORT = int(os.getenv("APP_PORT") or 5000)
 # 会话签名密钥：登录一次后记住状态用的。生产建议在 .env 里设一个随机串。
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 
