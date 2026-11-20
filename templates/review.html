@@ -297,7 +297,6 @@
       </button>
       {% endif %}
       <button class="ghost" onclick="preview('{{ a.id }}')">预览成品</button>
-      <button class="ghost" onclick="saveOnly('{{ a.id }}')">仅保存</button>
       {% if a.status == 'approved' %}
       <button class="ghost" onclick="setStatus('{{ a.id }}','pending')">退回待审</button>
       {% endif %}
@@ -410,11 +409,6 @@ function payload(id) {
     title: document.getElementById('title-' + id).value,
     body: document.getElementById('body-' + id).value
   };
-}
-
-async function saveOnly(id) {
-  const r = await api('/update', payload(id));
-  toast(r.ok ? '已保存' : '保存失败');
 }
 
 async function saveAnd(id, status) {
