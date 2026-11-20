@@ -81,7 +81,26 @@ AI_THINKING = os.getenv("AI_THINKING", "0") == "1"
 _provider = AI_PROVIDERS[AI_PROVIDER]
 AI_BASE_URL = _provider["base_url"]
 AI_MODEL = _provider["model"]
-AI_FALLBACK_MODEL = _provider.get("fallback_model", "")  # 限流时降级用
+AI_FALLBACK_MODEL = _provider.get("fallback_model", "")  # 同平台备用模型（限流时降级）
+
+# ---- 跨平台兜底 ----
+# 为什么需要它：智谱免费档约 1 QPS，早高峰必 429；原先的兜底是同平台 glm-4-flash，
+# 它写出过"懒人养生，真的有效吗？"这种设问标题，比不写还糟。
+# 现在改成：4.7 限流/报错时，直接换 DeepSeek 的付费模型重试一次。
+# 只有限流时段才产生费用，按每天 5 篇算每月仍是个位数。
+# 想关掉就留空；想换回弱模型兜底，把 AI_FALLBACK_PROVIDER 留空即可（走上面的 AI_FALLBACK_MODEL）。
+AI_FALLBACK_PROVIDER = os.getenv("AI_FALLBACK_PROVIDER", "").strip()
+if AI_FALLBACK_PROVIDER and AI_FALLBACK_PROVIDER not in AI_PROVIDERS:
+    print(f"[config] AI_FALLBACK_PROVIDER={AI_FALLBACK_PROVIDER} 不认识，已忽略")
+    AI_FALLBACK_PROVIDER = ""
+
+_fb_provider = AI_PROVIDERS.get(AI_FALLBACK_PROVIDER) if AI_FALLBACK_PROVIDER else None
+AI_FALLBACK_BASE_URL = _fb_provider["base_url"] if _fb_provider else ""
+# 允许只改模型名（比如兜底也用 flash，但想换 v4-pro 时）
+AI_FALLBACK_MODEL = (
+    os.getenv("AI_FALLBACK_MODEL", "").strip() or (_fb_provider["model"] if _fb_provider else AI_FALLBACK_MODEL)
+)
+AI_FALLBACK_API_KEY = os.getenv(_fb_provider["key_env"], "") if _fb_provider else ""
 
 # 单次请求超时（秒）。原来 120 秒够用，改成长稿（1300-1700 字）后
 # 4.7 生成一篇常要 2 分钟以上，120 秒会直接 Read timeout，白白丢一版稿。
@@ -93,6 +112,49 @@ AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "240"))
 #   3. 直接填在下面的 AI_API_KEY 字符串里
 # 全部留空 → 系统走"真实素材卡"模式，不编造任何正文。
 AI_API_KEY = os.getenv(_provider["key_env"], "") or os.getenv("AI_API_KEY", "")
+
+# 头图走智谱 CogView，DeepSeek 不生图。所以生图 key 永远取智谱那把，
+# 跟 AI_PROVIDER 解耦——否则哪天把主力换成 DeepSeek，头图会静默失效。
+ZHIPU_IMAGE_KEY = os.getenv("ZHIPU_API_KEY", "") or os.getenv("AI_API_KEY", "")
+
+
+def ai_targets() -> list[dict[str, str]]:
+    """按顺序返回要尝试的模型：主模型 → 兜底模型。
+
+    配了 AI_FALLBACK_PROVIDER 就跨平台兜底（智谱→DeepSeek），
+    没配就退回同平台的备用模型（4.7→glm-4-flash）。
+    用列表而不是单个 (model) 字符串，是因为跨平台时 base_url 和 key 都要跟着换，
+    只传模型名会把 DeepSeek 的模型名发到智谱的接口上去。
+    """
+    targets: list[dict[str, str]] = [
+        {
+            "provider": AI_PROVIDER,
+            "base_url": AI_BASE_URL,
+            "model": AI_MODEL,
+            "api_key": AI_API_KEY,
+        }
+    ]
+    # 跨平台兜底：平台、地址、key 一起换
+    if AI_FALLBACK_PROVIDER and AI_FALLBACK_API_KEY:
+        targets.append(
+            {
+                "provider": AI_FALLBACK_PROVIDER,
+                "base_url": AI_FALLBACK_BASE_URL,
+                "model": AI_FALLBACK_MODEL,
+                "api_key": AI_FALLBACK_API_KEY,
+            }
+        )
+    # 同平台备用模型：只在没配跨平台兜底时才用（否则会先掉进弱模型，兜底等于白配）
+    elif AI_FALLBACK_MODEL and AI_FALLBACK_MODEL != AI_MODEL:
+        targets.append(
+            {
+                "provider": AI_PROVIDER,
+                "base_url": AI_BASE_URL,
+                "model": AI_FALLBACK_MODEL,
+                "api_key": AI_API_KEY,
+            }
+        )
+    return [t for t in targets if t["api_key"]]
 
 # 每次生成的文章数量（建议 3-5，精修时够挑）
 BATCH_SIZE = 5

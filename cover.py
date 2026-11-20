@@ -110,7 +110,8 @@ def generate_cover(article: dict[str, Any], force: bool = False) -> str | None:
     if not article_id:
         return None
 
-    api_key = config.AI_API_KEY
+    # 生图只走智谱 CogView，跟写作模型解耦：主力换成 DeepSeek 时头图照样能出
+    api_key = config.ZHIPU_IMAGE_KEY
     if not api_key:
         print("[cover] 未配置 ZHIPU_API_KEY，跳过头图生成")
         return None

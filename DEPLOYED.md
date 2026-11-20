@@ -367,3 +367,23 @@ crontab -l
   **每天早上 8 点的 cron 正好落在闲时**（UTC 00:00），单价减半。
 - 验证：`AI_PROVIDER=deepseek` 下解析出 `https://api.deepseek.com/chat/completions`、
   `model=deepseek-flash`、思考已关；智谱路径（4.7 关思考 / flash 不传）行为未变。
+
+## 二十三、4.7 主 + DeepSeek 兜底（2026-11-20，main）
+- 背景：智谱免费档约 1 QPS，早高峰 429；原兜底是同平台 `glm-4-flash`，会写出
+  "懒人养生，真的有效吗？"这类设问标题，比不出稿还糟。
+- 新增跨平台兜底：`AI_FALLBACK_PROVIDER=deepseek`。`_call_model` 的入参由"模型名"
+  改成 target dict（provider/base_url/model/api_key）——跨平台时地址和 key 都要换，
+  只传模型名会把 `deepseek-flash` 发到智谱接口上，必 400。
+- `config.ai_targets()` 统一决定尝试顺序：主模型 → 跨平台兜底；没配跨平台时才用同平台备用模型。
+  限流与报错都会切换（免费档的 429、偶发 5xx 都算"这家现在不能用"）。
+- 头图 key 与写作模型解耦：新增 `config.ZHIPU_IMAGE_KEY`，`cover.py` 改用它。
+  否则哪天主力换成 DeepSeek，AI_API_KEY 变成 DeepSeek 的 key，CogView 会静默失效。
+- 实测（11:20）：4.7 当时正在限流，日志 `glm-4.7-flash 限流 → 换 deepseek/deepseek-flash`，
+  兜底稿 1339 字、4 处加粗、4 个小节、标题 14 字，只剩"结尾缺动作"一项待人工补。
+- 顺带修两个真 bug（A/B 时撞出来的）：
+  - **标题被截到 8 字**：原逻辑只取第一个标点前内容，遇到"混元大模型开源后，……"
+    就切出 8 个字的空壳。改为首句不足 12 字时丢掉首句、用后面完整子句（实测 15-22 字）。
+  - **加粗 23 处**：结构自检报了但重写未必改掉，新增 `cap_bold()` 兜底——
+    每节只留第一句加粗、总数 ≤5。
+- 成本：只有 4.7 不可用时才走 DeepSeek。按 flash 闲时 $0.15/$0.60 每 1M，
+  一篇约 ¥0.04，全量兜底也只 ¥6/月；8:00 的 cron 落在闲时（UTC 00:00）半价。

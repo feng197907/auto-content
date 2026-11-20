@@ -249,10 +249,15 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     return items[:limit]
 
 
-def _call_model(prompt: str, model: str) -> tuple[str | None, str]:
-    """调单个模型，返回 (内容, 状态)。状态: ok / ratelimit / error。"""
+def _call_model(prompt: str, target: dict[str, str]) -> tuple[str | None, str]:
+    """调单个模型，返回 (内容, 状态)。状态: ok / ratelimit / error。
+
+    target 是 dict（provider/base_url/model/api_key），不是一个模型名字符串：
+    跨平台兜底时智谱和 DeepSeek 的地址、key 都不一样，
+    只传模型名会把 deepseek-flash 发到智谱的接口上去，必 400。
+    """
     payload: dict[str, Any] = {
-        "model": model,
+        "model": target["model"],
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.8,
     }
@@ -260,16 +265,16 @@ def _call_model(prompt: str, model: str) -> tuple[str | None, str]:
     # 思考内容还可能混进正文）。写稿用不上推理，默认显式关掉；
     # .env 里 AI_THINKING=1 可恢复默认行为。
     if not getattr(config, "AI_THINKING", False) and (
-        (config.AI_PROVIDER == "zhipu" and "4.7" in model)
-        or config.AI_PROVIDER == "deepseek"
+        (target["provider"] == "zhipu" and "4.7" in target["model"])
+        or target["provider"] == "deepseek"
     ):
         payload["thinking"] = {"type": "disabled"}
 
     try:
         response = requests.post(
-            f"{config.AI_BASE_URL}/chat/completions",
+            f"{target['base_url']}/chat/completions",
             headers={
-                "Authorization": f"Bearer {config.AI_API_KEY}",
+                "Authorization": f"Bearer {target['api_key']}",
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -280,30 +285,35 @@ def _call_model(prompt: str, model: str) -> tuple[str | None, str]:
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"], "ok"
     except (requests.RequestException, KeyError, IndexError) as exc:
-        print(f"  AI 调用失败({model}): {exc}")
+        print(f"  AI 调用失败({target['model']}): {exc}")
         return None, "error"
 
 
 def call_ai(prompt: str) -> str | None:
-    """调 AI 生成初稿：主模型限流时自动降级到备用模型，失败返回 None。
+    """按 config.ai_targets() 的顺序调用：主模型 → 兜底模型，全失败返回 None。
 
-    免费模型访问量大，4.7 常被限流；降级到同样免费的老版保证出稿稳定。
-    两个都失败才返回 None，由上层降级到真实素材卡。
+    兜底顺序由 .env 决定：
+      AI_FALLBACK_PROVIDER=deepseek → 4.7 挂了换 DeepSeek（付费但稳）
+      不配 → 退回同平台的 glm-4-flash（免费但会写出设问标题）
+    限流和报错都会切换——免费档的 429 和偶发 500 都算"这家现在不能用"。
     """
-    if not config.AI_API_KEY:
+    targets = config.ai_targets()
+    if not targets:
         return None
 
-    models = [config.AI_MODEL]
-    if config.AI_FALLBACK_MODEL and config.AI_FALLBACK_MODEL not in models:
-        models.append(config.AI_FALLBACK_MODEL)
-
-    for model in models:
-        content, status = _call_model(prompt, model)
+    for index, target in enumerate(targets):
+        content, status = _call_model(prompt, target)
         if status == "ok":
+            if index:
+                print(f"  已切到兜底模型 {target['model']} 出稿")
             return content
-        if status == "ratelimit":
-            print(f"  {model} 限流" + ("，切换备用模型" if model != models[-1] else ""))
+
+        nxt = targets[index + 1] if index + 1 < len(targets) else None
+        if not nxt:
+            print(f"  {target['model']} {'限流' if status == 'ratelimit' else '调用失败'}，无可用兜底")
             continue
+        reason = "限流" if status == "ratelimit" else "调用失败"
+        print(f"  {target['model']} {reason} → 换 {nxt['provider']}/{nxt['model']}")
     return None
 
 
@@ -753,20 +763,61 @@ def unwrap_paragraph_bold(body: str, keep: int = 5) -> str:
 
 
 def shorten_title(title: str, limit: int = 22) -> str:
-    """标题超长时在中文标点处断开，只留前半句。
+    """标题超长时按中文标点切，尽量保住 12-22 字的信息量。
 
     公众号分享卡片大约 22 字就截断，"腾讯姚顺雨主导 AI 架构精简，而全公司 11 万人
     面临大调整，这类扁平化变革落地难点在哪？"这种 46 字标题，读者根本看不到重点。
-    只在标点处切（保住语义），切出来不足 10 字就放弃，宁可交人工也不切出半句话。
+
+    踩过的坑：只取第一个标点前的内容，遇到"混元大模型开源后，中小团队自建推理……"
+    就会切出 8 个字的"混元大模型开源后"——短到没有任何信息点。
+    所以首句不足 12 字时，改成丢掉首句、用后面完整的子句（"中小团队自建推理的成本账要怎么算"）。
     """
     text = re.sub(r"<[^>]+>", "", title).strip()
     if len(text) <= limit:
         return text
-    for sep in ("：", "，", "、", "；", "？", "?", "！"):
-        head = text.split(sep)[0].strip()
-        if 8 <= len(head) <= limit:
-            return head
-    return text
+
+    parts = [p.strip() for p in re.split(r"[：，、；？！?!]", text) if p.strip()]
+
+    # 1) 从第一句开始往后拼，能塞进 limit 的最长组合（保住主语）
+    for take in range(len(parts), 0, -1):
+        candidate = "，".join(parts[:take])
+        if 12 <= len(candidate) <= limit:
+            return candidate
+
+    # 2) 首句太短（如 8 字），丢掉它，用后面的子句
+    for index in range(1, len(parts)):
+        if 12 <= len(parts[index]) <= limit:
+            return parts[index]
+        candidate = "，".join(parts[index:])
+        if 12 <= len(candidate) <= limit:
+            return candidate
+
+    # 3) 实在没有合适切点（比如整句没有标点），才按字数硬切
+    return text[:limit]
+
+
+def cap_bold(body: str, limit: int = 5) -> str:
+    """加粗超过 limit 处时兜底收敛：每节只留第一句加粗，总数不超过 limit。
+
+    实测模型会把半篇都加粗（一次 23 处），结构自检虽然报错，重写却未必改掉，
+    最后发出去等于全文没有重点。代码收敛比反复求模型可靠。
+    """
+    if body.count("<strong>") <= limit:
+        return body
+
+    out: list[str] = []
+    kept = 0
+    for block in re.split(r"(?=<h2>)", body):
+        used_here = 0
+        for seg in re.split(r"(<strong>.*?</strong>)", block, flags=re.S):
+            if seg.startswith("<strong>") and (used_here >= 1 or kept >= limit):
+                out.append(seg[len("<strong>"):-len("</strong>")])
+                continue
+            if seg.startswith("<strong>"):
+                used_here += 1
+                kept += 1
+            out.append(seg)
+    return "".join(out)
 
 
 def drop_title_heading(body: str, title: str) -> str:
@@ -796,7 +847,9 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
     title = shorten_title(title)
     body = drop_title_heading(markdown_to_html("\n".join(body_lines)), title)
     return title, tidy_spaces(
-        strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+        cap_bold(
+            strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+        )
     )
 
 
