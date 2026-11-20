@@ -19,6 +19,9 @@ data/covers/
 DEPLOYED.local.bak
 *.local.*
 
+# 部署前的目录级备份（服务器上按 YYYYMMDD_HHMM_说明 命名，只留 3 份）
+.backups/
+
 # Python 缓存
 __pycache__/
 *.pyc
