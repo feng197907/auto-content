@@ -57,12 +57,28 @@ QUOTE_STYLE = (
 )
 # 引用块内部的段落：跟着引用块走，别再叠一层 17px 和 20px 的段距
 QUOTE_P_STYLE = "font-size:16px;line-height:1.9;color:#334155;margin:0 0 8px;"
-# 分隔线：公众号认 section 的 border，用空 section 画一条细线。
-# 颜色刻意压到接近白纸的灰度，只做节奏不抢眼；再重就会把文章切成碎片。
-HR_STYLE = "margin:28px 0;border-top:1px solid #e8ebf0;font-size:0;line-height:0;height:0;"
-# 自动插在两节之间的那条：上边留 30px、下边交给小标题自己的 margin-top，
-# 否则「线到标题」的间距会比「正文到线」大出一截，看着不匀
-DIV_STYLE = "margin:30px 0 0;border-top:1px solid #eceff4;font-size:0;line-height:0;height:0;"
+# 分隔线：公众号认 section 的 border，但通栏实线太硬，统一改成两端渐隐的渐变线。
+# 先写一层纯色背景兜底——万一某个客户端不支持 linear-gradient，
+# 退回一条浅灰细线，不会变成空白。
+
+def _fade_line(color: str, solid: str) -> str:
+    """生成一条「两端透明、中段浅灰」的渐变线样式。"""
+    hex_ = color.lstrip("#")
+    r, g, b = (int(hex_[i : i + 2], 16) for i in (0, 2, 4))
+    clear = f"rgba({r},{g},{b},0)"
+    return (
+        f"background:{solid};"
+        f"background:-webkit-linear-gradient(left,{clear} 0%,{color} 20%,"
+        f"{color} 80%,{clear} 100%);"
+        f"background:linear-gradient(to right,{clear} 0%,{color} 20%,"
+        f"{color} 80%,{clear} 100%);"
+    )
+
+
+# 手动 <hr>：比自动线稍深一点点，作者特意写的地方应该看得出来
+HR_STYLE = "margin:28px 0;height:1px;font-size:0;line-height:0;" + _fade_line("#dde3ec", "#eef1f6")
+# 自动插在两节之间的那条：更淡，只做节奏，读者不该注意到它
+DIV_STYLE = "margin:30px 0 0;height:1px;font-size:0;line-height:0;" + _fade_line("#e2e7f0", "#eef1f6")
 IMG_STYLE = (
     "max-width:100%;height:auto;display:block;margin:6px auto 18px;"
     "border-radius:6px;"

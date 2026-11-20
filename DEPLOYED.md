@@ -589,11 +589,15 @@ crontab -l
 - 对比样张：本地 `output/排版预览.html`（未入库，output/ 已忽略）。
 
 ### 5) 节间分隔线（2026-11-20）
-- 需求：每两节之间插一条分隔线，长文不要一整块糊下来；颜色别太重。
+- 需求：每两节之间插一条分隔线，长文不要一整块糊下来；颜色别太重；**两端要慢慢淡化**。
 - 做法：`_add_section_dividers()` 在**第 2 节及以后**的小标题前插
-  `<section style="margin:30px 0 0;border-top:1px solid #eceff4;height:0">`。
+  `<section style="margin:30px 0 0;height:1px;…">`。
   第 1 节前不插（那里紧跟导读卡片，再来一根线会把开头切碎）。
-- 颜色：手动 `<hr>` 用 `#e8ebf0`，自动分隔线用更淡的 `#eceff4`（原来是 `#e5e7eb`，偏灰重）。
+- 线型：1px 高 + 横向渐变，两端 `rgba(...,0)` 透明、20%–80% 区间纯色。
+  同时输出 `-webkit-linear-gradient` 与标准 `linear-gradient`，并前置一层纯色背景兜底：
+  客户端不支持渐变时退回极浅实线，不会变成空白。
+- 颜色：自动线中段 `#e2e7f0`（兜底 `#eef1f6`），手动 `<hr>` 中段 `#dde3ec` 稍深一档。
+  演进过程 `#e5e7eb`（通栏实线，偏重）→ `#eceff4`（通栏实线，仍嫌生硬）→ 现在两端渐隐。
 - 间距：上一节正文到线 30px（`margin-top` 与上块 20px 折叠后取 30），线到标题交给
   h2 自己的 `margin-top:30px`，两侧均匀。
 - 开关：`.env` 里 `WECHAT_SECTION_DIVIDER=0` 关闭，默认开。实测关闭后 0 条，序号仍保留。
