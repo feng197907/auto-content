@@ -360,8 +360,22 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # 审核页公网地址：推送到微信的链接就指向这里，带密码
-# 例：https://your-domain.com/?pwd=你的密码
-REVIEW_URL = os.getenv("REVIEW_URL", "")
+# 例：http://1.2.3.4:8080/?pwd=你的密码
+# 变量名在历史上换过一次（旧名见下面 _review_url 的说明），不同机器的 .env 里
+# 可能还是旧名。这里按 REVIEW_ 前缀宽松匹配，取到非空值就用，避免出现
+# "推送成功但链接是空字符串" 这种很难发现的故障。
+def _review_url() -> str:
+    """取审核页公网地址，兼容 REVIEW_URL 与旧变量名。"""
+    preferred = os.getenv("REVIEW_URL", "").strip()
+    if preferred:
+        return preferred
+    for key, value in os.environ.items():
+        if key.startswith("REVIEW_") and value.strip():
+            return value.strip()
+    return ""
+
+
+REVIEW_URL = _review_url()
 
 # ---- 微信推送（Server酱）----
 # key 放 .env 的 SERVERCHAN_KEY，这里读出来供 notify.py 用
