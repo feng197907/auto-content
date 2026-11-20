@@ -51,7 +51,8 @@ tail -f /opt/auto-content/data/cron.log
 # 手动跑一次每日任务（验证用）
 cd /opt/auto-content && .venv/bin/python daily_job.py --count 3
 
-# 改配置后：.env 改完无需重启（每次请求实时读）；
+# 改配置后：.env 改完需要 systemctl restart auto-content；
+#           config.py 在启动时就把 .env 读进内存了，不重启不会生效（原文档写反了，2026-11-20 更正）；
 #           代码 .py 改完需 systemctl restart auto-content
 
 # 查看/修改定时任务
