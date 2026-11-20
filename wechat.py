@@ -24,22 +24,44 @@ H_STYLE = (
     "font-size:19px;font-weight:700;color:#111827;line-height:1.6;"
     "margin:30px 0 14px;padding-left:10px;border-left:3px solid #1d4ed8;"
 )
+# 小标题前的 01/02 序号：比标题小两号、只占颜色不占重量，起节奏作用
+H_NUM_STYLE = (
+    "color:#1d4ed8;font-size:14px;font-weight:700;"
+    "letter-spacing:1px;margin-right:9px;"
+)
 P_STYLE = (
     "font-size:17px;line-height:1.95;color:#1f2937;letter-spacing:.4px;"
     "margin:0 0 20px;"
 )
+# 首段当导读：浅底卡片 + 深一点的字色，读者一眼知道这是全文提要
+LEAD_STYLE = (
+    "font-size:17px;line-height:1.9;color:#111827;letter-spacing:.4px;"
+    "margin:0 0 26px;padding:16px 18px;background:#f6f8fb;border-radius:8px;"
+)
+# 悬挂缩进：换行后文字对齐到标记右侧，不会顶到圆点下面
 LI_STYLE = (
     "font-size:17px;line-height:1.95;color:#1f2937;letter-spacing:.4px;"
-    "margin:0 0 10px;padding-left:6px;"
+    "margin:0 0 12px;padding-left:24px;text-indent:-24px;"
 )
-A_STYLE = "color:#1d4ed8;text-decoration:none;"
+LI_MARK_STYLE = "color:#1d4ed8;font-weight:700;margin-right:8px;"
+A_STYLE = "color:#1d4ed8;text-decoration:none;border-bottom:1px solid #bfdbfe;"
+STRONG_STYLE = "color:#0f172a;font-weight:700;"
+EM_STYLE = "font-style:italic;color:#334155;"
 CODE_STYLE = (
     "background:#f3f4f6;border-radius:4px;padding:1px 5px;"
     "font-size:14px;color:#b91c1c;"
 )
 QUOTE_STYLE = (
-    "margin:0 0 18px;padding:12px 16px;background:#f8fafc;"
-    "border-left:3px solid #cbd5e1;color:#475569;font-size:15px;line-height:1.85;"
+    "margin:0 0 22px;padding:16px 18px;background:#f3f6fd;border-radius:8px;"
+    "border-left:3px solid #1d4ed8;color:#334155;font-size:16px;line-height:1.9;"
+)
+# 引用块内部的段落：跟着引用块走，别再叠一层 17px 和 20px 的段距
+QUOTE_P_STYLE = "font-size:16px;line-height:1.9;color:#334155;margin:0 0 8px;"
+# 分隔线：公众号认 section 的 border，用空 section 画一条细线
+HR_STYLE = "margin:30px 0;border-top:1px solid #e5e7eb;font-size:0;line-height:0;"
+IMG_STYLE = (
+    "max-width:100%;height:auto;display:block;margin:6px auto 18px;"
+    "border-radius:6px;"
 )
 # 命令块：公众号不支持 <pre> 的滚动/等宽继承，改成深色 section + 等宽字体 + <br> 换行
 PRE_STYLE = (
@@ -76,6 +98,10 @@ class _Converter(HTMLParser):
         self.parts: list[str] = []
         self.stack: list[str] = []
         self.in_pre = False
+        self.quote_depth = 0
+        self.seen_lead = False
+        # ul/ol 各自计数，ol 要出真实序号，不能统一成圆点
+        self.lists: list[dict[str, Any]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr = dict(attrs)
@@ -83,20 +109,25 @@ class _Converter(HTMLParser):
             self.parts.append(f'<p style="{H_STYLE}">')
             self.stack.append("p")
         elif tag == "p":
-            self.parts.append(f'<p style="{P_STYLE}">')
+            self.parts.append(f'<p style="{self._p_style()}">')
             self.stack.append("p")
         elif tag in ("ul", "ol"):
-            self.parts.append('<section style="margin:0 0 18px;">')
+            self.parts.append('<section style="margin:0 0 20px;">')
             self.stack.append("section")
+            self.lists.append({"kind": tag, "n": 0})
         elif tag == "li":
             # 不用 <ul><li>：公众号对列表标签的清洗规则不稳定，圆点会丢
-            self.parts.append(f'<p style="{LI_STYLE}">•&nbsp;')
+            mark = self._next_mark()
+            self.parts.append(
+                f'<p style="{LI_STYLE}">'
+                f'<span style="{LI_MARK_STYLE}">{mark}</span>'
+            )
             self.stack.append("p")
         elif tag in ("strong", "b"):
-            self.parts.append("<strong>")
+            self.parts.append(f'<strong style="{STRONG_STYLE}">')
             self.stack.append("strong")
         elif tag in ("em", "i"):
-            self.parts.append("<em>")
+            self.parts.append(f'<em style="{EM_STYLE}">')
             self.stack.append("em")
         elif tag == "a":
             href = (attr.get("href") or "").strip()
@@ -118,15 +149,46 @@ class _Converter(HTMLParser):
         elif tag == "blockquote":
             self.parts.append(f'<section style="{QUOTE_STYLE}">')
             self.stack.append("section")
+            self.quote_depth += 1
+        elif tag == "hr":
+            self.parts.append(f'<section style="{HR_STYLE}"></section>')
+        elif tag == "img":
+            # 以前这里直接把 img 当"外壳"丢掉，正文里的配图会整张消失
+            src = (attr.get("src") or "").strip()
+            if src:
+                self.parts.append(f'<img src="{escape(src)}" style="{IMG_STYLE}">')
         elif tag == "br":
             self.parts.append("<br>")
         # 其余标签（div/section/span/font…）丢掉外壳，只保留里面的文字
+
+    def _p_style(self) -> str:
+        """段落样式分三种：引用块内、全文首段导读、普通段落。"""
+        if self.quote_depth:
+            return QUOTE_P_STYLE
+        if not self.stack and not self.seen_lead:
+            self.seen_lead = True
+            return LEAD_STYLE
+        return P_STYLE
+
+    def _next_mark(self) -> str:
+        """列表标记：有序列表出 1. 2. 3.，无序出圆点。"""
+        if not self.lists:
+            return "•"
+        cur = self.lists[-1]
+        if cur["kind"] == "ol":
+            cur["n"] += 1
+            return f'{cur["n"]}.'
+        return "•"
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "code" and self.in_pre:
             return  # pre 内的 code 没有单独开标签
         if tag == "pre":
             self.in_pre = False
+        if tag == "blockquote" and self.quote_depth:
+            self.quote_depth -= 1
+        if tag in ("ul", "ol") and self.lists:
+            self.lists.pop()
         close = _CLOSE_TAG.get(tag)
         if not close:
             return
@@ -161,9 +223,40 @@ def _wrap_plain_text(text: str) -> str:
     """老稿/纯文本：按空行切段，每段包一层 <p>。"""
     blocks = [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
     out = []
-    for block in blocks:
+    for i, block in enumerate(blocks):
         lines = "<br>".join(escape(line, quote=False) for line in block.splitlines())
-        out.append(f'<p style="{P_STYLE}">{lines}</p>')
+        style = LEAD_STYLE if i == 0 else P_STYLE
+        out.append(f'<p style="{style}">{lines}</p>')
+    return "".join(out)
+
+
+# 小标题已自带序号的几种写法：1. / 一、 / 第一点 / （1）
+_HEAD_OPEN = f'<p style="{H_STYLE}">'
+_NUM_PREFIX_RE = re.compile(
+    r"^\s*(?:[0-9]{1,2}\s*[.、:：)）]|[0-9]{1,2}\s+"
+    r"|[（(]\s*[0-9一二三四五六七八九十]{1,3}\s*[)）]"
+    r"|[一二三四五六七八九十]{1,3}\s*[、.．]|第[一二三四五六七八九十]{1,3}[点节步])"
+)
+
+
+def _add_heading_numbers(html: str) -> str:
+    """给小标题加 01/02 序号。
+
+    标题自己已经写了「1.」「一、」这类序号的就不再叠一层，否则会出现
+    「01 1. 培训与陪伴」。只改样式不改文字，撤销时删掉这个函数即可。
+    """
+    if _HEAD_OPEN not in html:
+        return html
+    segments = html.split(_HEAD_OPEN)
+    out = [segments[0]]
+    n = 0
+    for seg in segments[1:]:
+        head = re.sub(r"<[^>]+>", "", seg[:40])
+        if _NUM_PREFIX_RE.match(head):
+            out.append(_HEAD_OPEN + seg)
+            continue
+        n += 1
+        out.append(f'{_HEAD_OPEN}<span style="{H_NUM_STYLE}">{n:02d}</span>{seg}')
     return "".join(out)
 
 
@@ -188,6 +281,9 @@ def to_wechat_html(body: str) -> str:
         html,
     )
     html = html.strip()
+
+    # 小标题加 01/02 序号（已有序号的不重复加）
+    html = _add_heading_numbers(html)
 
     # 可选增强：裸文本包 <span leaf="">（config.WECHAT_LEAF_WRAP 打开才生效）
     import config
