@@ -4,11 +4,23 @@
 这里用官方草稿箱接口把「标题 + 正文 + 封面」直接推进后台，人只需进后台
 预览、点发表。
 
+能做什么、不能做什么（2026-11 核实，别被旧教程误导）：
+  能：取 access_token、上传素材、draft/add 建草稿。**未认证的个人订阅号也可以**，
+      实测额度 1000 次/日。个人主体 2021 年起就不能做微信认证，所以"等认证了再说"
+      这条路对个人号是走不通的，不必等。
+  不能：freepublish（群发/发布）返回 48001。2025-07 起微信回收了个人主体、企业未认证
+      主体的发布接口权限——最后那一下"发表"必须在后台手动点，这不是代码没写好。
+      另外 2026-04《运营规范》明确禁止用脚本/AI 全自动替代真人发布，
+      所以"自动进草稿 + 人工审核 + 人工点发表"既是被权限限制的结果，也是合规的做法。
+
 三个前置条件，缺一个都推不进去（代码里会明确报出来是哪一条）：
-  1. 公众号已认证。未认证订阅号没有素材/草稿接口权限，会返回 48001。
-  2. 公众号后台「设置与开发 → 基本配置 → IP 白名单」里加上服务器出口 IP，
-     否则返回 40164。这一步最容易漏。
-  3. .env 里配 WECHAT_APPID / WECHAT_SECRET（后台「基本配置」里能看到）。
+  1. .env 里配 WECHAT_APPID / WECHAT_SECRET。
+     注意 2025-12-01 起入口搬家了：不在 mp.weixin.qq.com 的「基本配置」，改到
+     developers.weixin.qq.com/platform →「我的业务」→ 选公众号 → 基础信息/开发密钥。
+     AppSecret 只显示一次，忘了只能重置（重置会让别处的旧密钥立刻失效）。
+  2. IP 白名单加服务器出口 IP（当前 82.157.4.72），否则取 token 就返回 40164。
+     微信在换 token 那一步就校验来源 IP，配错了会误判成"账号没权限"。
+  3. 账号已完成管理员实名。个人号要的是实名，不是微信认证，别被提示带偏。
 
 用法：
     python publish.py --check          # 自检：凭据配了没、token 能不能取
@@ -42,7 +54,7 @@ ERR_HINTS = {
     41001: "缺少 access_token 参数",
     42001: "access_token 过期，重试即可（代码会自动刷新）",
     45009: "接口调用次数超了（每日限额），明天再试",
-    48001: "接口未授权。多半是公众号没认证，未认证号没有草稿箱接口权限",
+    48001: "接口未授权。草稿箱接口未认证号也能用；若出现在发布接口，那是个人号没有发布权限（正常）",
     48002: "API 已禁用，检查公众号是否被封禁或权限被回收",
     53404: "账号存在违规，接口被限制",
     45003: "标题超长（限制 64 字）",
@@ -161,7 +173,9 @@ def create_draft(
 
     token = token or get_access_token()
     article = {
-        "title": title[:64],
+        # 官方文档：标题总长度不超过 32 字（旧文档写 64，按严的来）。
+        # 我们的标题规则是 12-20 字，正常不会碰到；这里只做兜底防 45003。
+        "title": title[:32],
         "author": author[:16],
         "digest": (digest or "")[:120],
         "content": content,
@@ -253,7 +267,8 @@ def check() -> list[tuple[str, bool, str]]:
         rows.append(("取 access_token", False, str(exc)))
         return rows
 
-    # 素材接口探一下（顺带验证 IP 白名单和认证状态）
+    # 素材接口 + 草稿箱接口各探一次：这是两个独立接口，权限各自算账，
+    # 只验 token 通过不代表能建草稿（实测最容易踩的就是这个差别）。
     try:
         resp = requests.get(
             f"{API}/material/get_materialcount",
@@ -262,16 +277,34 @@ def check() -> list[tuple[str, bool, str]]:
         )
         payload = resp.json()
         if payload.get("errcode"):
-            rows.append(("素材/草稿接口权限", False, _explain(payload)))
+            rows.append(("素材接口权限", False, _explain(payload)))
         else:
             rows.append((
-                "素材/草稿接口权限",
+                "素材接口权限",
                 True,
                 f"正常，现有素材 图片{payload.get('image_count', 0)} "
                 f"视频{payload.get('video_count', 0)}",
             ))
     except Exception as exc:  # noqa: BLE001
-        rows.append(("素材/草稿接口权限", False, str(exc)[:120]))
+        rows.append(("素材接口权限", False, str(exc)[:120]))
+
+    try:
+        resp = requests.get(
+            f"{API}/draft/count",
+            params={"access_token": token},
+            timeout=20,
+        )
+        payload = resp.json()
+        if payload.get("errcode"):
+            rows.append(("草稿箱接口权限", False, _explain(payload)))
+        else:
+            rows.append((
+                "草稿箱接口权限",
+                True,
+                f"正常，现有草稿 {payload.get('total_count', 0)} 条",
+            ))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(("草稿箱接口权限", False, str(exc)[:120]))
 
     return rows
 

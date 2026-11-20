@@ -412,3 +412,31 @@ crontab -l
 > 回滚示例：`cd /opt/auto-content && cp -p .backups/20261120_1125_pre-deepseek/config.py . && cp -p .backups/20261120_1125_pre-deepseek/pipeline.py . && systemctl restart auto-content`
 >
 > 只留 3 份：`cd /opt/auto-content/.backups && ls -1t | tail -n +4 | xargs -r rm -rf`
+
+## 二十五、公众号草稿箱接入（2026-11-20，main）
+- 用户问"怎么接入微信公众号"。核查后发现**此前文档里有一条结论是错的**，本次更正：
+  - 旧说法："未认证订阅号没有草稿箱接口权限，会返回 48001"。
+  - 实际：2025-07 起微信回收的是**发布/群发**接口（`freepublish/*`、`message/mass/*`，个人主体与
+    企业未认证主体一律 48001）；**草稿箱 `draft/add`、素材 `material/*` 对未认证个人订阅号仍开放**，
+    实测额度 1000 次/日。多份 2026-10 前后的一手实测记录口径一致。
+  - 含义：个人号不必等认证（个人主体自 2021-01 起就没有认证入口，"先认证再接"这条路对个人号根本不存在）。
+- 另一个变化：**2025-12-01 起 AppSecret 与 IP 白名单从 mp.weixin.qq.com 迁到微信开发者平台**。
+  旧路径「设置与开发 → 基本配置」已找不到密钥，正确路径：
+  `developers.weixin.qq.com/platform` → 管理员扫码 → 我的业务 → 选公众号 → 基础信息 / 开发密钥。
+- 本次代码改动（publish.py）：
+  - `check()` 拆成两项探测：素材接口（`material/get_materialcount`）与**草稿箱接口（`draft/count`）**。
+    token、素材、草稿是三个独立权限，只验 token 通过不代表能建草稿——这是最容易误判的一处。
+  - 标题上限由 `[:64]` 收紧到 `[:32]`（现行官方文档为 32 字，旧文档写 64；按严的来，防 45003）。
+    现有标题规则 12-20 字，正常触不到。
+  - 48001 的提示语更正：不再说"没认证所以没权限"，改为"草稿箱未认证可用；若出现在发布接口属正常"。
+  - 文件头注释重写，写清"能做什么/不能做什么"以及合规边界。
+- `.env.example` 同步更正入口路径与出口 IP。
+- 服务器出口 IP 实测：`curl ifconfig.me` = **82.157.4.72**，内网 10.2.0.15，**无 IPv6**。
+  白名单只填 IPv4 一条即可，避开"双栈只加一个、时好时坏"的坑。
+- 待用户操作（三步，约 10 分钟）：
+  1. 开发者平台取 AppID + 重置生成 AppSecret（只显示一次）；
+  2. 同一页面「IP 白名单」加 82.157.4.72（保存后约 10 分钟生效）；
+  3. 填 `/opt/auto-content/.env` 的 `WECHAT_APPID` / `WECHAT_SECRET`，`systemctl restart auto-content`，
+     跑 `.venv/bin/python publish.py --check` 看三项是否全绿。
+- 合规边界（2026-04 运营规范）：明确禁止用脚本/AI 全自动替代真人发布，处罚阶梯限流→删文→能力限制→封禁。
+  本项目只做到"自动建草稿 + 人工审核 + 人工点发表"，正好在红线内。**不要**加 freepublish 自动发布。
