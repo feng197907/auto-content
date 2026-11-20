@@ -348,7 +348,7 @@ crontab -l
 - 热榜 0 命中时的行为已实测：把 `hot_topics.collect` 置空后仍能出 3 条（RSS 全量补齐），
   不会出现"没选题"或退回编造，故命中率低不需要改代码。
 
-> 回滚：`cd /opt/auto-content && cp -p .bak_20261120_1103/*.py . && cp -p .bak_20261120_1103/templates/* templates/ && systemctl restart auto-content`
+> 回滚：见第二十四节——该备份目录已于 2026-11-20 11:40 清理，现统一放 `.backups/`。
 
 ## 二十二、支持切 DeepSeek（2026-11-20，main）
 - 背景：智谱 4.7 早高峰限流，准备接 DeepSeek 兜底。
@@ -387,3 +387,28 @@ crontab -l
     每节只留第一句加粗、总数 ≤5。
 - 成本：只有 4.7 不可用时才走 DeepSeek。按 flash 闲时 $0.15/$0.60 每 1M，
   一篇约 ¥0.04，全量兜底也只 ¥6/月；8:00 的 cron 落在闲时（UTC 00:00）半价。
+
+## 二十四、服务器备份清理 + 备份新约定（2026-11-20 11:40）
+- 起因：用户看到 `/opt/auto-content` 根目录一排 `*.bak_*`，问"怎么这么多备份文件"。
+- 清点结果：根目录 25 个散文件（344K）+ `templates/` 5 个（81K）+ 3 个整目录快照（408K），
+  合计约 750K。磁盘 4.1G/40G（11%），**不是空间问题，是认不出哪份能回滚**。
+- 来源：11-19 做功能时每部署一次就存一份 `文件名.bak_<功能名>`（cleanup/auth/topic/opt/src/
+  cn/author/cover/rich/skeleton/viral/break 共 12 轮）；11-20 改成整目录快照 `.bak_20261120_xxxx`。
+- 已删：根目录 25 个 + `templates/` 5 个散文件、`.bak_20261120_1103/`、`.bak_20261120_1125/`。
+- 已保留：`.backups/20261120_1125_pre-deepseek/`（原 `.bak_20261120_1165/`——原目录名分钟位写成 65，
+  不是合法时间，本次改名修正）。内含 `config.py` `pipeline.py` `DEPLOYED.md` 三个文件。
+  **注意它不是完整快照**：部署脚本只备份"即将被覆盖的文件"，所以 app.py / templates 不在里面，
+  回滚这两类要从 git 取。
+- 未动：`data/queue.json.bak_cleanup / .bak_opt / .bak_topic`（3 个队列快照，是稿件数据不是代码），
+  以及 `.env`、`.env.bak_20261120`、`data/`。
+- 清理后核对：`systemctl is-active` = active、`/?pwd=` 200、`queue.json` mtime 仍是 11:08:56
+  （早于本次操作，未被改动）、`config.AI_PROVIDER=zhipu` / fallback=`deepseek` 未变。
+- 新约定（以后部署照此办）：
+  - 备份统一放 `.backups/`，不再散落在项目根目录；
+  - 命名 `<YYYYMMDD_HHMM>_<说明>`，例：`.backups/20261120_1125_pre-deepseek`；
+  - 只保留最近 3 份，第 4 份产生时删最旧的；
+  - 备份只是"刚部署完发现坏了"的几分钟保险，隔天回滚一律走 git（本地仓库 + GitHub 有全量历史）。
+
+> 回滚示例：`cd /opt/auto-content && cp -p .backups/20261120_1125_pre-deepseek/config.py . && cp -p .backups/20261120_1125_pre-deepseek/pipeline.py . && systemctl restart auto-content`
+>
+> 只留 3 份：`cd /opt/auto-content/.backups && ls -1t | tail -n +4 | xargs -r rm -rf`
