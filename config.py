@@ -402,6 +402,10 @@ SITE_AUTHOR = os.getenv("SITE_AUTHOR", "Plan B 的AI笔记")
 # 默认关闭——当前输出已经实测能正常粘贴，先开校验观察一段时间，需要时再开这个。
 WECHAT_LEAF_WRAP = os.getenv("WECHAT_LEAF_WRAP", "0") == "1"
 
+# 相邻两节之间自动插一条极淡的分隔线（#eceff4）。长文换气用，默认开；
+# 觉得啰嗦就在 .env 里写 WECHAT_SECTION_DIVIDER=0。
+WECHAT_SECTION_DIVIDER = os.getenv("WECHAT_SECTION_DIVIDER", "1") == "1"
+
 # ---- 微信公众号草稿箱（可选）----
 # 配了才能用「推到草稿箱」；不配就继续用复制粘贴，不影响其他功能。
 # AppID / AppSecret 在公众号后台「设置与开发 → 基本配置」里。

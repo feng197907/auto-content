@@ -57,8 +57,12 @@ QUOTE_STYLE = (
 )
 # 引用块内部的段落：跟着引用块走，别再叠一层 17px 和 20px 的段距
 QUOTE_P_STYLE = "font-size:16px;line-height:1.9;color:#334155;margin:0 0 8px;"
-# 分隔线：公众号认 section 的 border，用空 section 画一条细线
-HR_STYLE = "margin:30px 0;border-top:1px solid #e5e7eb;font-size:0;line-height:0;"
+# 分隔线：公众号认 section 的 border，用空 section 画一条细线。
+# 颜色刻意压到接近白纸的灰度，只做节奏不抢眼；再重就会把文章切成碎片。
+HR_STYLE = "margin:28px 0;border-top:1px solid #e8ebf0;font-size:0;line-height:0;height:0;"
+# 自动插在两节之间的那条：上边留 30px、下边交给小标题自己的 margin-top，
+# 否则「线到标题」的间距会比「正文到线」大出一截，看着不匀
+DIV_STYLE = "margin:30px 0 0;border-top:1px solid #eceff4;font-size:0;line-height:0;height:0;"
 IMG_STYLE = (
     "max-width:100%;height:auto;display:block;margin:6px auto 18px;"
     "border-radius:6px;"
@@ -239,6 +243,25 @@ _NUM_PREFIX_RE = re.compile(
 )
 
 
+def _add_section_dividers(html: str) -> str:
+    """相邻两节之间插一条极淡的分隔线，长文读起来才有换气的地方。
+
+    只在「第 2 节及以后」的小标题前插：第 1 节前面紧跟导读卡片，
+    再加一根线会把开头切碎。`.env` 里 WECHAT_SECTION_DIVIDER=0 可关掉。
+    """
+    if _HEAD_OPEN not in html:
+        return html
+    segments = html.split(_HEAD_OPEN)
+    if len(segments) <= 2:
+        return html
+    out = [segments[0]]
+    for i, seg in enumerate(segments[1:], start=1):
+        if i > 1:
+            out.append(f'<section style="{DIV_STYLE}"></section>')
+        out.append(_HEAD_OPEN + seg)
+    return "".join(out)
+
+
 def _add_heading_numbers(html: str) -> str:
     """给小标题加 01/02 序号。
 
@@ -282,11 +305,16 @@ def to_wechat_html(body: str) -> str:
     )
     html = html.strip()
 
+    import config
+
+    # 相邻两节之间插一条极淡的分隔线（WECHAT_SECTION_DIVIDER=0 可关）
+    if getattr(config, "WECHAT_SECTION_DIVIDER", True):
+        html = _add_section_dividers(html)
+
     # 小标题加 01/02 序号（已有序号的不重复加）
     html = _add_heading_numbers(html)
 
     # 可选增强：裸文本包 <span leaf="">（config.WECHAT_LEAF_WRAP 打开才生效）
-    import config
     if getattr(config, "WECHAT_LEAF_WRAP", False):
         html = wrap_leaf(html)
     return html

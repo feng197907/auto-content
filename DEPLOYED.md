@@ -587,3 +587,13 @@ crontab -l
 - 合成用例覆盖 ol / blockquote / hr / img / code / a / 已带序号的标题，全部正常。
 - 预览路由 `/preview/<id>` 与复制接口 `/plain/<id>` 的 `html` 字段均含新样式。
 - 对比样张：本地 `output/排版预览.html`（未入库，output/ 已忽略）。
+
+### 5) 节间分隔线（2026-11-20）
+- 需求：每两节之间插一条分隔线，长文不要一整块糊下来；颜色别太重。
+- 做法：`_add_section_dividers()` 在**第 2 节及以后**的小标题前插
+  `<section style="margin:30px 0 0;border-top:1px solid #eceff4;height:0">`。
+  第 1 节前不插（那里紧跟导读卡片，再来一根线会把开头切碎）。
+- 颜色：手动 `<hr>` 用 `#e8ebf0`，自动分隔线用更淡的 `#eceff4`（原来是 `#e5e7eb`，偏灰重）。
+- 间距：上一节正文到线 30px（`margin-top` 与上块 20px 折叠后取 30），线到标题交给
+  h2 自己的 `margin-top:30px`，两侧均匀。
+- 开关：`.env` 里 `WECHAT_SECTION_DIVIDER=0` 关闭，默认开。实测关闭后 0 条，序号仍保留。
