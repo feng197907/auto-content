@@ -329,3 +329,22 @@ crontab -l
 - 微博/B站/抖音/快手当天的榜单以时政娱乐为主，领域命中率天然低；这是账号定位决定的，不是源的问题。
 - 搜狗微信的链接是带 token 的跳转地址，会过期；文末"信息来源"长期看可能失效。
 - 旧稿结构硬伤的（5-8 个小节）无法靠扩写修好，只能重写。
+
+### 8) 生产部署（2026-11-20 11:03，main @ cb09d42）
+- 上传方式：paramiko SFTP（服务器无 git，root 密码登录）。上线文件 11 个：`app.py` `config.py`
+  `pipeline.py` `hot_topics.py` `wechat.py` `publish.py`（新增）`cover.py` `templates/review.html`
+  `templates/preview.html` `DEPLOYED.md` `.env.example`（新增）。
+- 备份：服务器 `.bak_20261120_1103/`（含 templates 子目录），`.env` 与 `data/` 一律不动。
+- 上服务器才发现：`publish.py` 之前只提交了仓库、**没传过服务器**，`wechat.py` 也是 19:21 的旧版
+  （7.2KB vs 16.9KB）。这次一并补上，草稿箱按钮和富文本复制在线上才真正可用。
+- 编译 + 重启：`py_compile` 8 个文件全过，`systemctl restart auto-content` 后 active。
+- 生产验证：
+  - 源健康检查 **16/16 全通**（机房出口网络比本地还快，知乎 339ms、快手 519ms、B站 156ms）。
+  - 选题分布（limit=5）：百度 1 + 公众号 1 + IT之家 1 + 开源中国 1 + 雷峰网 1。
+  - 页面：`/?pwd=xxx` 200，待审列表 9 处「待审」标记，队列数据完好；不带参数 401（鉴权正常）。
+  - `publish.py --check`：AppID/AppSecret 仍未配（有意为之，未认证订阅号调不通），其余项通过。
+  - cron 未动：`0 8 * * * cd /opt/auto-content && .venv/bin/python daily_job.py`。
+- 热榜 0 命中时的行为已实测：把 `hot_topics.collect` 置空后仍能出 3 条（RSS 全量补齐），
+  不会出现"没选题"或退回编造，故命中率低不需要改代码。
+
+> 回滚：`cd /opt/auto-content && cp -p .bak_20261120_1103/*.py . && cp -p .bak_20261120_1103/templates/* templates/ && systemctl restart auto-content`
