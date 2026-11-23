@@ -147,6 +147,18 @@
     .modal-body .by { color:var(--muted); font-size:12px; margin-bottom:18px; }
     .tags { margin-top:22px; color:var(--muted); font-size:12px; }
 
+    /* 换标题候选 */
+    .title-opt { display:flex; align-items:flex-start; gap:12px; padding:14px;
+                 border:1px solid var(--line); border-radius:10px; margin-bottom:10px;
+                 background:#fff; }
+    .title-opt .no { flex:0 0 24px; height:24px; border-radius:50%; background:#eef2ff;
+                     color:#4338ca; font-size:13px; font-weight:700; text-align:center;
+                     line-height:24px; }
+    .title-opt .txt { flex:1; font-size:16px; line-height:1.6; color:#111827; font-weight:600; }
+    .title-opt .txt small { display:block; font-size:12px; color:var(--muted);
+                            font-weight:400; margin-top:4px; }
+    .title-opt button { flex:0 0 auto; min-height:38px; padding:6px 14px; font-size:13px; }
+
     /* 复制兜底弹窗 */
     .copy-tip { background:#fff8e6; border:1px solid #f5dfa8; color:#8a6100;
                 padding:10px 12px; border-radius:8px; font-size:13px; margin-bottom:12px; }
@@ -285,6 +297,8 @@
       {# 已通过列表：主按钮改为 AI 优化，基于原素材重写覆盖当前稿件 #}
       <button class="act-main" style="background:#1d4ed8;color:#fff;border-color:#1d4ed8;font-weight:600"
               id="opt-{{ a.id }}" onclick="aiOptimize('{{ a.id }}')">✦ AI优化 · 重写本篇</button>
+      <button class="act-full" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa;font-weight:600"
+              id="rt-{{ a.id }}" onclick="retitle('{{ a.id }}')">换标题 · 出 3 个备选</button>
       {% else %}
       <button class="ok act-main" onclick="saveAnd('{{ a.id }}','approved')">保存并通过</button>
       {% endif %}
@@ -316,6 +330,20 @@
       <button onclick="closeModal()">关闭</button>
     </div>
     <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- 换标题候选弹窗：3 个备选，用户挑一个才写回 -->
+<div class="modal" id="titleModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>换标题 · 选一个用</b>
+      <button onclick="closeTitleModal()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="copy-tip" id="titleTip">AI 正在按 3 种不同思路拟标题，请稍候…</div>
+      <div id="titleList"></div>
+    </div>
   </div>
 </div>
 
@@ -448,6 +476,71 @@ async function aiOptimize(id) {
     if (btn) { btn.disabled = false; btn.textContent = oldText; }
   }
 }
+
+/* ---- 换标题：AI 出 3 个候选，人挑一个才写回 ---- */
+const TITLE_FORMULAS = ['具体信息点', '反差 / 反常识', '利益直给'];
+async function retitle(id) {
+  const btn = document.getElementById('rt-' + id);
+  if (btn) { btn.disabled = true; btn.textContent = 'AI 正在拟标题…'; }
+  document.getElementById('titleTip').textContent = 'AI 正在按 3 种不同思路拟标题，请稍候…';
+  document.getElementById('titleList').innerHTML = '';
+  document.getElementById('titleModal').classList.add('show');
+  try {
+    const r = await api('/retitle', {id: id});
+    if (!r.ok) {
+      document.getElementById('titleTip').textContent = r.error || '换标题失败，原标题未改动';
+      return;
+    }
+    document.getElementById('titleTip').textContent = '三个标题用了三种不同公式，选一个采用（原标题不会被覆盖，除非你点采用）';
+    const list = document.getElementById('titleList');
+    list.innerHTML = '';
+    r.candidates.forEach(function (title, i) {
+      const row = document.createElement('div');
+      row.className = 'title-opt';
+      const no = document.createElement('div');
+      no.className = 'no';
+      no.textContent = String(i + 1);
+      const txt = document.createElement('div');
+      txt.className = 'txt';
+      txt.textContent = title;
+      const small = document.createElement('small');
+      small.textContent = TITLE_FORMULAS[i] || ('思路 ' + (i + 1));
+      txt.appendChild(small);
+      const use = document.createElement('button');
+      use.className = 'primary';
+      use.textContent = '用这个';
+      use.onclick = function () { applyTitle(id, title, use); };
+      row.appendChild(no); row.appendChild(txt); row.appendChild(use);
+      list.appendChild(row);
+    });
+  } catch (e) {
+    document.getElementById('titleTip').textContent = '换标题失败：' + e;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '换标题 · 出 3 个备选'; }
+  }
+}
+async function applyTitle(id, title, btn) {
+  if (!confirm('采用这个标题？正文、状态和头图都不会变。\n\n' + title)) return;
+  if (btn) { btn.disabled = true; btn.textContent = '采用中…'; }
+  try {
+    const r = await api('/title/apply', {id: id, title: title});
+    if (r.ok) {
+      toast('标题已换成：「' + (r.title || '').slice(0, 18) + '」');
+      closeTitleModal();
+      setTimeout(() => location.reload(), 800);
+    } else {
+      toast(r.error || '采用失败，原标题未改动');
+      if (btn) { btn.disabled = false; btn.textContent = '用这个'; }
+    }
+  } catch (e) {
+    toast('采用失败：' + e);
+    if (btn) { btn.disabled = false; btn.textContent = '用这个'; }
+  }
+}
+function closeTitleModal() { document.getElementById('titleModal').classList.remove('show'); }
+document.getElementById('titleModal').addEventListener('click', function (e) {
+  if (e.target === this) closeTitleModal();
+});
 
 async function setStatus(id, status) {
   const r = await api('/update', {id: id, status: status});

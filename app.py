@@ -33,6 +33,8 @@ from pipeline import (
     save_queue,
     run as run_pipeline,
     optimize_article,
+    regenerate_titles,
+    apply_title,
 )
 
 app = Flask(__name__)
@@ -221,6 +223,52 @@ def optimize() -> Any:
         "title": updated["title"],
         "body": updated["body"],
     })
+
+
+@app.route("/retitle", methods=["POST"])
+def retitle() -> Any:
+    """换标题：只生成 3 个候选返回，不写回队列，由用户挑一个再调 /title/apply。
+
+    和 /optimize 分开两步，是因为标题是打开率的关键，不能让 AI 悄悄定。
+    """
+    data = request.get_json(silent=True) or {}
+    article_id = data.get("id", "")
+    if not article_id:
+        return jsonify({"ok": False, "error": "缺少稿件 id"}), 400
+
+    queue = load_queue()
+    article = next((a for a in queue if a.get("id") == article_id), None)
+    if article is None:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+
+    candidates = regenerate_titles(article)
+    if not candidates:
+        return jsonify({
+            "ok": False,
+            "error": "换标题失败：AI 暂时不可用或候选不合格，原标题未改动",
+        })
+    return jsonify({"ok": True, "id": article_id, "candidates": candidates})
+
+
+@app.route("/title/apply", methods=["POST"])
+def title_apply() -> Any:
+    """应用用户选中的标题。只动 title 一个字段，正文/状态/头图都不碰。"""
+    data = request.get_json(silent=True) or {}
+    article_id = data.get("id", "")
+    title = (data.get("title") or "").strip()
+    if not article_id or not title:
+        return jsonify({"ok": False, "error": "缺少稿件 id 或标题"}), 400
+
+    if not generate_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "正在生成或优化中，请稍候"}), 409
+    try:
+        updated = apply_title(article_id, title)
+    finally:
+        generate_lock.release()
+
+    if updated is None:
+        return jsonify({"ok": False, "error": "应用失败：稿件不存在或标题不合法"})
+    return jsonify({"ok": True, "id": updated["id"], "title": updated["title"]})
 
 
 @app.route("/notify", methods=["POST"])

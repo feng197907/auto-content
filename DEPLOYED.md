@@ -601,3 +601,43 @@ crontab -l
 - 间距：上一节正文到线 30px（`margin-top` 与上块 20px 折叠后取 30），线到标题交给
   h2 自己的 `margin-top:30px`，两侧均匀。
 - 开关：`.env` 里 `WECHAT_SECTION_DIVIDER=0` 关闭，默认开。实测关闭后 0 条，序号仍保留。
+
+## 三十、标题三备选 + 信息增量（2026-11-23，main）
+
+调研背景：用户反馈「标题要更抓人」「文章没营养」。查了 Easel（ZJU-REAL/Easel，4.8k star，
+浙大 REAL Lab + 北大 OpenDCAI Lab）的实际实现，可借鉴的是三件事：
+1. 标题公式库 `skills/shared/references/hook-title-formulas.md`：分利益/痛点/反差/数字等 7 类，
+   明确「一次只用一个公式」「具体优于空泛」；小红书文案会出 2-3 个备选再挑。
+2. 账号画像是 6 个独立文件（identity/audience/style/preferences/platforms/memory），
+   不是一句提示词；长期记忆只沉淀可复用洞察，不堆流水账。
+3. 内容支柱比例 + 7 维选题评分（`pillar-and-cadence.md` / `scoring-dimensions.md`）。
+
+本次只落地 1 和 3 的轻量版，不引入 Agent 架构：
+
+### 1) 换标题：一次出 3 个备选，人挑才写回
+- `config.TITLE_VARIANTS_RULE`：三个候选分别用「具体信息点 / 反差反常识 / 利益直给」三种公式，
+  按本号调性删掉小红书式「谁懂啊」「闭眼入」。
+- `pipeline.build_retitle_prompt()` + `regenerate_titles()`：基于正文前 1600 字 + 真实素材生成，
+  只让模型动标题、禁止改正文角度。
+- `_parse_title_candidates()`：剥编号/引号、去重、诱导词黑名单、长度 10-24 字、
+  **标题里的数字必须能在素材或正文里找到**（防编数字）。
+- `apply_title()`：只写 title 一个字段，mode 留痕「AI换标题」，approved_at 不刷新。
+- 接口：`POST /retitle`（只读不写回）、`POST /title/apply`（写回）。
+- 前端：已通过稿新增「换标题 · 出 3 个备选」按钮 + 候选弹窗，每个候选标公式名，点「用这个」才采用。
+
+### 2) 信息增量：解决「没营养」
+- `config.INFO_GAIN_RULE`：每节必须给出具体事实 / 明确判断 / 可执行细节之一，
+  注入生成与重写两个提示词。
+- `pipeline.content_advice()` 检测：(a) 每节有无数字/英文专名/动作词锚点；
+  (b) 素材有数字但正文一个没用；(c) 空泛判断句扎堆。
+- **关键设计：建议不是硬伤**。建议项带 `[内容建议]` 前缀，`optimize_article` 的 hard 判断、
+  `has_hard_issue` 都排除它——改不掉也允许写回，否则结构合格只是略空泛的稿子会被判死
+  （沿用 2026-11-20「重写卡死」的教训）。
+- 生成侧：结构问题或内容建议任一出现，就共用那一次重写机会；采纳条件改成
+  「结构问题数 + 建议数」前后对比，避免只有建议时新稿永远不被采纳。
+
+### 3) 验证
+- 标题解析：正常三候选通过；诱导词/过短/素材没有的数字全部被拦。
+- 接口：/retitle 返回 3 候选、/title/apply 只改 title；模板两按钮与弹窗均渲染。
+- 内容建议：空泛稿报 4 条、正向稿 0 条；建议未混入 hard 判断（hard 仅 1 条为原稿结构问题）。
+- 端到端重写：结构合格稿重写成功，内容建议清零，status=approved 保持不变。

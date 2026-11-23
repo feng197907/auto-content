@@ -401,6 +401,7 @@ def build_prompt(item: dict[str, Any]) -> str:
         "普通叙述不要放代码块\n"
         "6. 不要写导语说明、不要解释你的思路，直接输出标题和正文\n\n"
         f"{config.ARTICLE_SKELETON}\n"
+        f"{config.INFO_GAIN_RULE}\n"
         "自检三问（写完自己过一遍）：\n"
         "· 标题里有没有具体信息点，让人一眼知道跟自己有关？\n"
         "· 开头三行之内，读者能不能看出'这事和我有什么干系'？\n"
@@ -467,6 +468,7 @@ def build_optimize_prompt(
         "4. 命令、配置片段用三个反引号单独包成代码块，一行一条命令\n"
         "5. 不要写导语说明、不要解释你的思路，直接输出标题和正文\n\n"
         f"{config.ARTICLE_SKELETON}\n"
+        f"{config.INFO_GAIN_RULE}\n"
         + (
             "旧稿存在的具体问题（这一版必须全部改掉）：\n"
             + "\n".join(f"· {x}" for x in issues[:6])
@@ -1175,9 +1177,64 @@ HARD_ISSUE_MARKERS = (
 def has_hard_issue(issues: list[str]) -> bool:
     """是否还有扩写解决不了的硬伤。"""
     return any(
-        not is_length_issue(x) and any(m in x for m in HARD_ISSUE_MARKERS)
+        not is_length_issue(x)
+        and not x.startswith(_ADVICE_TAG)
+        and any(m in x for m in HARD_ISSUE_MARKERS)
         for x in issues
     )
+
+
+# 建议项统一前缀，用于从「硬伤」里剔除——建议改不掉也必须允许写回
+_ADVICE_TAG = "[内容建议] "
+
+
+def content_advice(body: str, desc: str = "") -> list[str]:
+    """内容质量「建议」，不是硬伤——只回灌给模型改进，绝不阻止写回。
+
+    为什么要分开：structure_issues 里的每一条在重写时都会被当成必须修的硬伤，
+    修不掉就导致整篇不写回。而"这节有没有增量"是语义判断，模型未必一次改好，
+    代码也可能误判。把它做成建议，既给了模型改进方向，又不会因为改不干净
+    就用不了稿子（2026-11-20 重写卡死的教训）。
+
+    检测的都是能客观量化的信号：
+      1. 每节有没有具体锚点：数字、版本号、英文专名、明确的动作词；
+      2. 全篇空泛判断句是否扎堆（没有锚点的短句）；
+      3. 素材里有数字但正文一个都没用上——大概率在复述空话。
+    """
+    advice: list[str] = []
+    plain = re.sub(r"<[^>]+>", "", body)
+    sections = re.split(r"<h2>.*?</h2>", body, flags=re.S)[1:]
+
+    # 具体锚点：数字 / 版本号 / 英文专名 / 可执行的动作词
+    anchor_words = (
+        "检查", "查看", "确认", "升级", "自查", "修改", "运行", "执行",
+        "打开", "关闭", "删除", "重启", "命令", "设置", "选项", "版本",
+    )
+    for index, section in enumerate(sections, 1):
+        text = re.sub(r"<[^>]+>", "", section)
+        has_num = bool(re.search(r"\d", text))
+        has_en = bool(re.search(r"[A-Za-z]{3,}", text))
+        has_action = any(w in text for w in anchor_words)
+        if not (has_num or has_en or has_action):
+            advice.append(_ADVICE_TAG +
+                f"第 {index} 节没有任何具体信息（数字/专名/可执行动作），"
+                "读起来像空话，请补一个能落地的细节")
+
+    # 素材里有数字，正文却一个数字都没出现：基本可以断定在复述
+    material_nums = set(re.findall(r"\d+(?:\.\d+)?", desc))
+    if material_nums and not re.search(r"\d", plain):
+        advice.append(_ADVICE_TAG + "素材里有具体数字（版本/金额/时间），正文却一个都没用上，请写进去")
+
+    # 空泛判断扎堆
+    vague = (
+        "值得关注", "影响深远", "意义重大", "至关重要", "拭目以待",
+        "大幅提高", "显著提升", "带来变革",
+    )
+    hits = sum(plain.count(w) for w in vague)
+    if hits >= 3:
+        advice.append(_ADVICE_TAG + f"空泛判断句出现 {hits} 次，请换成具体事实或明确动作")
+
+    return advice
 
 
 def strip_meta_notes(body: str) -> str:
@@ -1263,21 +1320,31 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
             title, body = parse_response(raw, topic)
             mode = "AI 改写"
 
-            # 结构不合格：把问题清单回灌给模型，重写一次（只重试一次，控成本）
+            # 结构不合格 / 内容空泛：共用这一次重写机会（只重试一次，控成本）。
+            # content_advice 是建议不是硬伤，单独判断，不影响"结构合格"的结论。
             issues = structure_issues(body, title, desc, min_words)
-            if issues:
-                print(f"  结构自检未过：{'、'.join(issues)} → 重写一次")
+            advice = content_advice(body, desc)
+            if issues or advice:
+                reason = "结构自检未过" if issues else "内容增量不足"
+                print(f"  {reason}：{'、'.join(issues or advice)} → 重写一次")
                 fix_prompt = (
                     f"{prompt}\n\n"
-                    f"你上一版存在这些问题：{'；'.join(issues)}。\n"
+                    f"你上一版存在这些问题：{'；'.join(issues + advice)}。\n"
                     "请严格按上面的结构模板重写全文：小标题必须是陈述句、"
                     "数量控制在 3 个、每节第一句加粗、每节写到 300 字以上、"
-                    "去掉空话套话。"
+                    "去掉空话套话。每节都要有读者能拿到的具体信息，"
+                    "不要只是把同一件事换成几种说法。"
                 )
                 raw2 = call_ai(fix_prompt)
                 if raw2:
                     title2, body2 = parse_response(raw2, topic)
-                    if len(structure_issues(body2, title2, desc, min_words)) < len(issues):
+                    # 用「结构问题 + 内容建议」总数比，任一侧改善就采纳。
+                    # 只比 issues 的话，纯内容建议（issues 为空）时新稿永远不会被采纳。
+                    before_score = len(issues) + len(advice)
+                    after_score = len(structure_issues(body2, title2, desc, min_words)) + len(
+                        content_advice(body2, desc)
+                    )
+                    if after_score < before_score:
                         title, body = title2, body2
 
             # 重试也未必改得掉，最后统一把编造的配置行剥一次
@@ -1343,6 +1410,10 @@ def optimize_article(
     issues = structure_issues(
         article.get("body", ""), article.get("title", ""), desc, min_words
     )
+    # 内容建议一并告诉模型，但不进 hard 判断——改不掉也允许写回，
+    # 否则一篇结构合格、只是略空泛的稿子会被判死（2026-11-20 教训）。
+    advice = content_advice(article.get("body", ""), desc)
+    issues = issues + advice
 
     new_title, new_body = article.get("title", ""), article.get("body", "")
     for attempt in range(max_retry + 1):
@@ -1354,7 +1425,11 @@ def optimize_article(
 
         cand_title, cand_body = parse_response(raw, article.get("title", "优化稿件"))
         left = structure_issues(cand_body, cand_title, desc, min_words)
-        hard = [x for x in left if not is_length_issue(x)]
+        # 建议项不算硬伤：改不掉也允许写回，否则结构合格只是略空泛的稿子会被判死
+        hard = [
+            x for x in left
+            if not is_length_issue(x) and not x.startswith(_ADVICE_TAG)
+        ]
         if not hard:
             new_title, new_body = cand_title, cand_body
             break
@@ -1378,6 +1453,123 @@ def optimize_article(
     article["mode"] = "AI优化重写"
     article["updated_at"] = datetime.now().isoformat(timespec="seconds")
     # status / approved_at 均不改动：已通过状态与保留期起算点保持原样
+    queue[index] = article
+    save_queue(queue)
+    return article
+
+
+def build_retitle_prompt(article: dict[str, Any]) -> str:
+    """拼「换标题」的提示词：给正文 + 真实素材，要 3 个不同公式的候选。
+
+    和 build_optimize_prompt 的区别：这里只让模型动标题，明确禁止改正文角度。
+    素材仍要带上，因为标题里的数字必须能对得上原文，不能自己编。
+    """
+    topic = article.get("topic") or article.get("title", "")
+    desc = (article.get("desc") or "").strip()
+    source = article.get("source", "实时热榜")
+    # 正文只给前 1600 字：够模型理解文章讲了什么，又不至于把 token 撑爆
+    body = body_to_text(article.get("body", ""))[:1600]
+
+    if desc:
+        material = f"真实素材（来自{source}）：\n{desc}"
+    else:
+        material = (
+            f"该话题来自{source}，只有原标题、没有正文素材。\n"
+            "标题里的数字只能来自下面的正文，正文没有就别写数字。"
+        )
+
+    return (
+        "你是公众号标题编辑。任务只有一个：给同一篇文章拟 3 个不同角度的标题。\n"
+        "不要重写正文，不要改变文章结论，只输出标题。\n\n"
+        f"原标题：{topic}\n"
+        f"{material}\n\n"
+        f"文章正文（节选）：\n{body}\n\n"
+        f"写作领域：{config.WRITING_NICHE}\n\n"
+        f"{config.TITLE_VARIANTS_RULE}"
+    )
+
+
+def _parse_title_candidates(raw: str, desc: str, body: str) -> list[str]:
+    """从模型输出里拆出最多 3 个候选标题，逐个过校验。
+
+    模型常犯：加「1.」编号、加引号、写成「标题：xxx」、三个候选其实换汤不换药、
+    自己编数字。这里逐条剥壳 + 去重 + 数字对账，宁可少给也别把坏标题摆上去让人选。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    material_nums = set(re.findall(r"\d+(?:\.\d+)?", desc + " " + body))
+
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 剥「1.」「①」「-」「*」等行首编号，剥引号和「标题：」前缀
+        line = re.sub(r"^\s*(?:\d+[.、)]|[①②③④⑤]|[-*])\s*", "", line)
+        line = strip_title_prefix(line)
+        line = line.strip().strip("\"'「」《》").strip()
+        if not line or "<" in line or ">" in line:
+            continue
+
+        # 诱导词：和结构校验同一份黑名单
+        if any(w in line for w in ("揭秘", "震惊", "速看", "炸裂", "马上删", "惊呆", "血亏", "封神")):
+            continue
+        # 长度：太短没信息，太长在分享卡片被截断
+        if not (10 <= len(line) <= 24):
+            continue
+        # 数字对账：素材/正文里找不到的数字不收
+        nums = re.findall(r"\d+(?:\.\d+)?", line)
+        if nums and not all(n in material_nums for n in nums):
+            continue
+        # 去重：模型爱把同一个标题换两个字再给一遍
+        key = re.sub(r"\s|[，。！？、：；]", "", line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def regenerate_titles(article: dict[str, Any]) -> list[str]:
+    """基于已通过稿件的正文与素材，生成 3 个备选标题（不写回队列）。
+
+    返回空列表代表 AI 不可用或候选全部不合格，调用方据此提示用户，
+    原稿标题始终保持不动。
+    """
+    raw = call_ai(build_retitle_prompt(article))
+    if not raw:
+        print("  换标题失败（模型不可用），保留原标题")
+        return []
+    desc = (article.get("desc") or "").strip()
+    body = article.get("body", "")
+    candidates = _parse_title_candidates(raw, desc, body)
+    if not candidates:
+        print(f"  换标题候选全部不合格，保留原标题：{raw[:80]}")
+    return candidates
+
+
+def apply_title(article_id: str, title: str) -> dict[str, Any] | None:
+    """把用户选中的候选标题写回稿件，只动 title，不动正文/状态/头图。
+
+    已通过稿件的 approved_at 不刷新——标题微调不该让稿件"重新过期"一轮。
+    mode 留痕为「AI换标题」，方便回溯是谁改的。
+    """
+    clean = shorten_title(title)
+    if not clean or not (8 <= len(clean) <= 24):
+        return None
+    queue = load_queue()
+    index = -1
+    for i, article in enumerate(queue):
+        if article.get("id") == article_id:
+            index = i
+            break
+    if index == -1:
+        return None
+    article = queue[index]
+    article["title"] = clean
+    article["mode"] = "AI换标题"
+    article["updated_at"] = datetime.now().isoformat(timespec="seconds")
     queue[index] = article
     save_queue(queue)
     return article
