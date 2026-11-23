@@ -1092,3 +1092,47 @@ crontab -l
   共 10 项全 PASS。临时测试文件验收后已删除，未入库。
 - **服务器生效**：`git pull` + `systemctl restart auto-content`。存量队列无需清理——即使其他栏目
   旧稿仍带 `unread: true`，页面也不会再为它们冒红点。
+
+---
+
+## 四十七、头条号自动存草稿（2026-11-23）
+
+- **需求**：用户已能手动操作头条号/百家号，问系统能否直接发布。结论：头条没有个人可用的官方
+  图文发布 API（抖音开放平台明确排除图文，唯一官方通道 RSS 只对新闻媒体/国家机构开放）；
+  纯 requests/cookie 打发布接口会因缺 `a_bogus` 签名被拒。用户选 B 档：**浏览器自动化存草稿，
+  发表那一步留给人**，先接头条号。
+- **实现**（两个新模块 + app 路由 + 前端入口）：
+  1. `toutiao_render.py`：头条专用裸 HTML 渲染。头条实测只保留 P/DIV/IMG/H3/STRONG/UL/LI/
+     BLOCKQUOTE/PRE，吃掉所有 style 和 section/a/em——所以不能复用公众号内联样式版。本模块
+     另起渲染分支：h1/h2 归并 h3、丢外链图（避免 7115 图片uri非法）、图片上传后带 web_uri 落地、
+     来源段剥离、代码块换行保真。
+  2. `toutiao_publish.py`：Playwright 持久化 profile（`data/toutiao_profile`）+ 首次二维码扫码
+     （后台线程轮询登录态）；图片经 `/spice/image` 上传（实测不需签名）；发布在页面上下文
+     `page.evaluate` 里 fetch `/mp/agw/article/publish`，借头条风控 SDK 自动补 `msToken/a_bogus`。
+     **`save=0` 存草稿，绝不默认直接发布**；所有接口常量集中在文件顶部，改版时只改一处。
+  3. `app.py`：`/toutiao/status` `/toutiao/qr` `/toutiao/login` `/toutiao/draft/<id>` 四个路由，
+     存草稿走后台线程（浏览器操作慢，不卡 HTTP）；草稿 id/链接回写稿件。
+  4. `review.html`：账号画像下方加「头条号」登录面板（扫码二维码 + 状态轮询）；已通过稿卡片加
+     「存头条草稿」按钮 + 打开草稿链接；`config.TOUTIAO_ENABLED/TOUTIAO_HEADLESS` 两个开关。
+- **技术调研依据**：2026-09 实测调研（CDP 直连 + 独立 profile 页面上下文调内部接口端到端跑通；
+  纯 HTTP 因缺签名被拒；wechatsync 头条适配器已私有化、编译版不给封面）。本实现用 Playwright
+  的 persistent context 达成同样效果，无需浏览器扩展。
+- **验证**：渲染器 15 项 PASS（标签清洗/无 style/图片合规落地/来源剥离/代码换行）；payload 13 项
+  PASS（save=0/pgc_id=0/封面 coverType/pgc_feed_covers 字段）；页面与路由 15 项 PASS（路由注册、
+  未装 Playwright 时明确报错、不存在稿件 404、主页渲染）。共 43 项全 PASS。
+  **注意**：真实扫码登录与真实存草稿需在有头条账号的服务器上验证，本地无账号未做实发。
+- **服务器生效步骤（一次性）**：
+  1. `cd /opt/auto-content && git pull`
+  2. `pip install playwright`（或 `pip install -r requirements.txt`）
+  3. `playwright install chromium`
+  4. `playwright install-deps chromium`（RHEL 系装系统依赖，可能要 sudo）
+  5. `systemctl restart auto-content`
+  6. 审核页 →「头条号」面板 → 点「头条扫码登录」→ 用头条 App 扫码 → 成功后即可给已通过稿
+     点「存头条草稿」→ 去头条后台草稿箱检查、点发表。
+- **已知边界/风险**：
+  - 头条接口是内部接口、变更频繁（图片链路已换过三代）。endpoint/字段集中在
+    `toutiao_publish.py` 顶部常量和 `_build_publish_payload`，改版后按实测值更新即可。
+  - 无头浏览器可能在首次触发风控/滑块；扫码登录本身是正常登录不受影响，存草稿是低频操作，
+    风险可控。若某天存草稿失败，页面会如实报错，不会误报成功。
+  - 登录态存服务器 `data/toutiao_profile`（不随 git 同步），换机要重新扫码。
+  - `TOUTIAO_ENABLED=0` 可一键关掉所有头条入口，不影响其他功能。

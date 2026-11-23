@@ -349,6 +349,34 @@
     </div>
   </details>
 
+  <!-- 头条号登录管理（自动存草稿，不发布） -->
+  {% if toutiao_enabled %}
+  <details class="review-panel" id="toutiaoBox">
+    <summary>头条号 · 自动存草稿（登录一次，之后稿件一键存草稿）</summary>
+    <div class="rp-body">
+      <div class="rp-empty" style="margin-bottom:10px;">
+        头条没有个人可用的官方发布 API，本功能只把稿件<b>存进草稿箱</b>，最后「发表」仍需你进头条后台点一下。
+        登录态存在服务器独立浏览器配置里，扫码一次长期复用。
+      </div>
+      {% if not toutiao_ready %}
+      <div class="rp-empty" style="color:#c2410c;">服务器还没装 Playwright，无法自动存草稿。安装命令见交付说明。</div>
+      {% else %}
+      <div id="ttLoginState" class="pf-msg">
+        {% if toutiao_logged_in %}✅ 头条已登录，可以直接给稿件存草稿{% else %}⚠️ 头条未登录，先扫码{% endif %}
+      </div>
+      <div class="pf-actions">
+        <button class="primary" onclick="toutiaoLogin()">{{ '重新扫码登录' if toutiao_logged_in else '头条扫码登录' }}</button>
+      </div>
+      <div id="ttQrBox" style="display:none;margin-top:12px;text-align:center;">
+        <img id="ttQrImg" src="/toutiao/qr" alt="头条登录二维码"
+             style="max-width:220px;border:1px solid var(--line);border-radius:8px;">
+        <div class="hint" style="margin-top:6px;">用头条 App 扫码，扫完这里会自动变「登录成功」</div>
+      </div>
+      {% endif %}
+    </div>
+  </details>
+  {% endif %}
+
   <!-- 内容日历 + 节日节点 -->
   <details class="review-panel" id="calendarBox">
     <summary>内容日历 · 节日节点（近 3 周）</summary>
@@ -517,6 +545,14 @@
               {% if not a.cover %}disabled title="先在上面生成头图，公众号草稿必须带封面"{% endif %}>
         {{ '再推一次草稿箱' if a.draft_id else '推到草稿箱' }}
       </button>
+      {% endif %}
+      {% if a.status == 'approved' and toutiao_enabled and toutiao_ready %}
+      {# 存到头条草稿箱：只存草稿不发布，人还要进头条后台点发表 #}
+      <button class="ghost" id="tt-{{ a.id }}" onclick="toutiaoDraft('{{ a.id }}')"
+              {% if not toutiao_logged_in %}disabled title="先在上方「头条号」面板扫码登录"{% endif %}>
+        {{ '再存一次头条草稿' if a.toutiao_draft_id else '存头条草稿' }}
+      </button>
+      {% if a.toutiao_draft_url %}<a class="dl" href="{{ a.toutiao_draft_url }}" target="_blank" rel="noopener">打开头条草稿</a>{% endif %}
       {% endif %}
       <button class="ghost" onclick="preview('{{ a.id }}')">预览成品</button>
       <button class="ghost" onclick="openRecord('{{ a.id }}')">录数据</button>
@@ -1134,6 +1170,86 @@ async function pushDraft(id) {
     toast('推送失败：' + e);
     if (btn) { btn.disabled = false; btn.textContent = old; }
   }
+}
+
+/* ---- 头条号：扫码登录 + 存草稿（只存草稿不发布）---- */
+async function toutiaoLogin() {
+  const box = document.getElementById('ttQrBox');
+  const state = document.getElementById('ttLoginState');
+  try {
+    const r = await api('/toutiao/login', {});
+    if (!r.ok) { toast(r.error || '发起登录失败'); return; }
+    if (r.already) { toast('头条已经登录'); return; }
+    // 打开二维码区，开始轮询登录结果
+    if (box) box.style.display = '';
+    if (state) state.textContent = '正在打开登录页…';
+    pollToutiaoLogin(0);
+  } catch (e) { toast('发起登录失败：' + e); }
+}
+function pollToutiaoLogin(times) {
+  if (times > 150) return; // 最多轮询约 5 分钟
+  setTimeout(async function () {
+    try {
+      const r = await api('/toutiao/status', {});
+      const st = r.login || {};
+      const state = document.getElementById('ttLoginState');
+      const box = document.getElementById('ttQrBox');
+      if (box && st.qr) box.style.display = '';
+      if (state && st.message) state.textContent = st.message;
+      if (st.status === 'success') {
+        if (box) box.style.display = 'none';
+        toast('头条登录成功，登录态已保存');
+        setTimeout(function () { location.reload(); }, 1000);
+        return;
+      }
+      if (st.status === 'error' || st.status === 'timeout') {
+        toast(st.message || '登录失败，请重试');
+        return;
+      }
+      pollToutiaoLogin(times + 1);
+    } catch (e) { pollToutiaoLogin(times + 1); }
+  }, 2000);
+}
+
+async function toutiaoDraft(id) {
+  const btn = document.getElementById('tt-' + id);
+  if (btn && btn.disabled) return;
+  const again = btn && btn.textContent.indexOf('再存') >= 0;
+  if (!confirm(again
+    ? '这篇之前存过头条草稿。再存会在头条后台新建一条，确定？'
+    : '把这篇文章存进头条草稿箱？\n只存草稿，发表要你进头条后台自己点。')) return;
+
+  const old = btn ? btn.textContent : '存头条草稿';
+  if (btn) { btn.disabled = true; btn.textContent = '存草稿中…'; }
+  toast('正在上传封面并存草稿，约 10 秒');
+  try {
+    const r = await api('/toutiao/draft/' + id, {});
+    if (!r.ok) { toast(r.error || '存草稿失败'); if (btn) { btn.disabled = false; btn.textContent = old; } return; }
+    pollToutiaoDraft(id, btn, 0, old);
+  } catch (e) {
+    toast('存草稿失败：' + e);
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+function pollToutiaoDraft(id, btn, times, old) {
+  if (times > 60) { toast('存草稿超时，去头条后台看看有没有生成'); if (btn) { btn.disabled = false; btn.textContent = old; } return; }
+  setTimeout(async function () {
+    try {
+      const r = await api('/toutiao/status', {});
+      const d = r.draft || {};
+      if (!d.running && d.article_id === id) {
+        if (d.result && d.result.ok) {
+          toast('已存到头条草稿箱，去头条后台点发表');
+          setTimeout(function () { location.reload(); }, 1200);
+        } else {
+          toast(d.message || '存草稿失败');
+          if (btn) { btn.disabled = false; btn.textContent = old; }
+        }
+        return;
+      }
+      pollToutiaoDraft(id, btn, times + 1, old);
+    } catch (e) { pollToutiaoDraft(id, btn, times + 1, old); }
+  }, 2000);
 }
 
 async function genCover(id, btn) {  if (!btn) btn = event && event.target;

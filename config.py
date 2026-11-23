@@ -597,3 +597,11 @@ WECHAT_SECTION_DIVIDER = os.getenv("WECHAT_SECTION_DIVIDER", "1") == "1"
 # 还要把服务器出口 IP 加到该页面的「IP 白名单」，否则报 40164。
 WECHAT_APPID = os.getenv("WECHAT_APPID", "").strip()
 WECHAT_SECRET = os.getenv("WECHAT_SECRET", "").strip()
+
+# ---- 头条号自动存草稿（可选，2026-11-23 新增）----
+# 原理：Playwright 持久化 profile 记住登录态，页面上下文调头条内部接口存草稿。
+# 头条无个人可用的官方发布 API，最后「发表」必须人进后台点，本系统只做存草稿。
+# 服务器前置：pip install playwright && playwright install chromium && playwright install-deps chromium
+# 首次在审核页点「头条登录」扫码，登录态写进 data/toutiao_profile，之后免扫。
+TOUTIAO_HEADLESS = os.getenv("TOUTIAO_HEADLESS", "1") == "1"  # 服务器无头运行
+TOUTIAO_ENABLED = os.getenv("TOUTIAO_ENABLED", "1") == "1"    # 总开关，出问题可关掉入口

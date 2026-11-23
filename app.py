@@ -32,6 +32,7 @@ import cover as cover_mod
 import wechat
 import publish as publish_mod
 import notify as notifier
+import toutiao_publish
 from pipeline import (
     load_queue,
     save_queue,
@@ -229,6 +230,9 @@ def index() -> str:
         cal_suggestion=content_calendar.suggestion(),
         platforms=wechat.platform_list(),
         platform_metas={p: wechat.platform_meta(p) for p in wechat.platform_list()},
+        toutiao_enabled=getattr(config, "TOUTIAO_ENABLED", True),
+        toutiao_ready=toutiao_publish.playwright_ready(),
+        toutiao_logged_in=toutiao_publish.configured(),
     )
 
 
@@ -618,6 +622,104 @@ def publish_draft(article_id: str) -> Any:
         save_queue(queue)
 
     return jsonify({"ok": True, "media_id": result["media_id"], "title": result["title"]})
+
+
+# ---- 头条号自动存草稿（只存草稿，不发布）----
+toutiao_draft_state: dict[str, Any] = {"running": False, "article_id": "", "message": "", "result": None}
+
+
+@app.route("/toutiao/status", methods=["GET", "POST"])
+def toutiao_status() -> Any:
+    """头条能力状态：Playwright 装没装、登录没登录、登录二维码进度。"""
+    return jsonify({
+        "enabled": getattr(config, "TOUTIAO_ENABLED", True),
+        "playwright_ready": toutiao_publish.playwright_ready(),
+        "logged_in": toutiao_publish.configured(),
+        "login": dict(toutiao_publish.login_state),
+        "draft": dict(toutiao_draft_state),
+    })
+
+
+@app.route("/toutiao/qr")
+def toutiao_qr() -> Any:
+    """返回登录二维码图片（扫码登录期间生成）。"""
+    path = toutiao_publish.QR_FILE
+    if not path.exists():
+        return jsonify({"error": "还没有二维码"}), 404
+    resp = send_file(path, mimetype="image/png", max_age=0)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.route("/toutiao/login", methods=["POST"])
+def toutiao_login() -> Any:
+    """发起头条扫码登录：后台开浏览器截二维码，前端轮询 /toutiao/status。"""
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "头条入口已关闭（TOUTIAO_ENABLED=0）"}), 400
+    if not toutiao_publish.playwright_ready():
+        return jsonify({
+            "ok": False,
+            "error": "服务器还没装 Playwright。执行：pip install playwright && "
+                     "playwright install chromium && playwright install-deps chromium",
+        }), 400
+    if toutiao_publish.configured():
+        return jsonify({"ok": True, "already": True, "message": "头条已登录"})
+    try:
+        toutiao_publish.ToutiaoPublisher().start_login()
+    except toutiao_publish.ToutiaoError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "started": True})
+
+
+def _toutiao_draft_worker(article: dict[str, Any]) -> None:
+    """后台线程：存草稿（浏览器操作慢，不能卡 HTTP 请求）。"""
+    global toutiao_draft_state
+    try:
+        result = toutiao_publish.ToutiaoPublisher().save_draft(article)
+        # 回写草稿标记到队列，重复点会提示"再存一条"
+        queue = load_queue()
+        index = find_article(queue, article.get("id", ""))
+        if index != -1:
+            queue[index]["toutiao_draft_id"] = result.get("pgc_id", "")
+            queue[index]["toutiao_draft_url"] = result.get("draft_url", "")
+            queue[index]["toutiao_draft_at"] = datetime.now().isoformat(timespec="seconds")
+            save_queue(queue)
+        toutiao_draft_state = {
+            "running": False, "article_id": article.get("id", ""),
+            "message": "已存到头条草稿箱，请进头条后台点发表", "result": result,
+        }
+    except Exception as exc:  # noqa: BLE001
+        toutiao_draft_state = {
+            "running": False, "article_id": article.get("id", ""),
+            "message": f"存草稿失败：{exc}", "result": None,
+        }
+
+
+@app.route("/toutiao/draft/<article_id>", methods=["POST"])
+def toutiao_draft(article_id: str) -> Any:
+    """把审核通过的稿件存成头条草稿（异步，前端轮询）。"""
+    global toutiao_draft_state
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "头条入口已关闭"}), 400
+    if toutiao_draft_state.get("running"):
+        return jsonify({"ok": False, "error": "正在存草稿，请稍候"}), 409
+
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+    if queue[index].get("status") != "approved":
+        return jsonify({"ok": False, "error": "先审核通过再存草稿"}), 400
+    if not toutiao_publish.playwright_ready():
+        return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
+    if not toutiao_publish.configured():
+        return jsonify({"ok": False, "error": "头条还没登录，先点「头条登录」扫码"}), 400
+
+    toutiao_draft_state = {"running": True, "article_id": article_id, "message": "正在存草稿…", "result": None}
+    threading.Thread(
+        target=_toutiao_draft_worker, args=(dict(queue[index]),), daemon=True
+    ).start()
+    return jsonify({"ok": True, "started": True})
 
 
 @app.route("/delete", methods=["POST"])
