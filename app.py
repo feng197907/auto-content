@@ -25,6 +25,8 @@ from flask import (
 
 import config
 import analytics
+import profile as profile_mod
+import content_calendar
 import cover as cover_mod
 import wechat
 import publish as publish_mod
@@ -162,6 +164,9 @@ def index() -> str:
         row["tone"] = ai_tone_check(body)
         articles.append(row)
 
+    # 日历：按日期分组 + 未来三周节日提醒（只展示与提醒，不改自动生成主链路）
+    full_queue = load_queue()
+    cal_queue = full_queue  # 日历看全部稿件，不受当前状态过滤影响
     return render_template(
         "review.html",
         articles=articles,
@@ -171,6 +176,13 @@ def index() -> str:
         publish_ready=publish_mod.configured(),
         analytics=analytics.summarize(),
         analytics_records=analytics.load_records(),
+        profile=profile_mod.load(),
+        profile_dims=profile_mod.DIMENSIONS,
+        cal_days=content_calendar.group_by_date(cal_queue),
+        cal_upcoming=content_calendar.upcoming(21),
+        cal_suggestion=content_calendar.suggestion(),
+        platforms=wechat.platform_list(),
+        platform_metas={p: wechat.platform_meta(p) for p in wechat.platform_list()},
     )
 
 
@@ -304,6 +316,33 @@ def analytics_delete() -> Any:
     if not article_id or not analytics.remove(article_id):
         return jsonify({"ok": False, "error": "记录不存在"}), 404
     return jsonify({"ok": True})
+
+
+@app.route("/profile/save", methods=["POST"])
+def profile_save() -> Any:
+    """保存账号画像六维。改动下次生成/改写/换标题时生效，不动已有稿件。"""
+    data = request.get_json(silent=True) or {}
+    profile_mod.save(data)
+    return jsonify({"ok": True, "profile": profile_mod.load()})
+
+
+@app.route("/profile/sync", methods=["POST"])
+def profile_sync() -> Any:
+    """把复盘结论写回画像的标题/来源偏好，形成闭环。"""
+    before = profile_mod.load()
+    updated = profile_mod.sync_from_analytics()
+    # 只有真的写回了新经验才算同步成功——画像里本来就有手填偏好时不误报
+    synced = (
+        updated.get("title_preference", "") != before.get("title_preference", "")
+        or updated.get("source_preference", "") != before.get("source_preference", "")
+    )
+    return jsonify({
+        "ok": True,
+        "synced": synced,
+        "title_preference": updated.get("title_preference", ""),
+        "source_preference": updated.get("source_preference", ""),
+        "synced_at": updated.get("synced_at", ""),
+    })
 
 
 @app.route("/notify", methods=["POST"])
@@ -478,42 +517,47 @@ def delete() -> Any:
 
 @app.route("/plain/<article_id>")
 def plain(article_id: str) -> Any:
-    """返回可复制的纯文本成品。"""
+    """返回可复制的成品。按 platform 选排版档位（公众号完整 / 头条百家简洁）。"""
     queue = load_queue()
     index = find_article(queue, article_id)
     if index == -1:
         return jsonify({"error": "稿件不存在"}), 404
 
     article = queue[index]
-    # html：带内联样式的富文本，粘到公众号能保留小标题竖线/加粗/列表圆点
-    # content：纯文本兜底，给不认格式的平台用
-    # 标题单独返回：公众号/头条号/百家号都是标题、正文分开录入，正文里不必重复标题
-    # check：排版校验结果，前端可据此提示「有几处会掉格式」
-    html = wechat.to_wechat_html(article["body"])
+    platform = request.args.get("platform", "")
+    # html：带内联样式的富文本，按平台切换档位；content：纯文本兜底
+    # 标题单独返回：各平台都是标题、正文分开录入，正文里不必重复标题
+    # title_advice：当前标题在该平台的字数是否合适（只提示不改）
+    html = wechat.to_platform_html(article["body"], platform)
     return jsonify({
         "title": article["title"],
         "content": wechat.to_plain_text(article["body"]),
         "html": html,
+        "platform": wechat.normalize_platform(platform),
+        "title_advice": wechat.title_advice(article["title"], platform),
         "check": wechat.summarize_issues(wechat.validate_html(html)),
     })
 
 
 @app.route("/preview/<article_id>")
 def preview(article_id: str) -> Any:
-    """返回成品预览 HTML，模拟平台发布后的排版效果。"""
+    """返回成品预览 HTML，模拟目标平台发布后的排版效果。"""
     queue = load_queue()
     index = find_article(queue, article_id)
     if index == -1:
         return jsonify({"error": "稿件不存在"}), 404
 
     article = queue[index]
+    platform = request.args.get("platform", "")
     return render_template(
         "preview.html",
         title=article["title"],
         # 用和"复制成品"完全相同的富文本，保证预览所见 = 粘贴所得
-        body=wechat.to_wechat_html(article["body"]),
-        platforms=config.TARGET_PLATFORMS,
+        body=wechat.to_platform_html(article["body"], platform),
+        platform=wechat.normalize_platform(platform),
+        platforms=wechat.platform_list(),
         author=config.SITE_AUTHOR,
+        title_advice=wechat.title_advice(article["title"], platform),
     )
 
 

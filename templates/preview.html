@@ -18,9 +18,9 @@
   </style>
 </head>
 <body>
+  <div class="by">预览平台：<b>{{ platform }}</b> · {{ '完整样式' if platform == '公众号' else '简洁档（去装饰）' }}　|　标题 {{ title_advice.chars }} 字，{{ title_advice.verdict }}（{{ title_advice.hint }}）</div>
   <h1>{{ title }}</h1>
-  <div class="by">{{ author }} · 发布于 {{ platforms | join(' / ') }}</div>
   {{ body | safe }}
-  <div class="tags">发布平台：{{ platforms | join(' · ') }}</div>
+  <div class="tags">{{ author }} · 可发布平台：{{ platforms | join(' · ') }}</div>
 </body>
 </html>

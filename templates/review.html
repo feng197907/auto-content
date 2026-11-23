@@ -223,6 +223,41 @@
     .rec-grid input, .rec-grid select, .modal-body > label input {
       font-size:15px; padding:9px 10px; border:1px solid var(--line);
       border-radius:8px; background:#fff; color:var(--ink); width:100%; }
+
+    /* ---- 账号画像面板 ---- */
+    .pf-field { margin-bottom:10px; }
+    .pf-field label { display:block; font-size:12px; font-weight:600; color:var(--ink); margin-bottom:3px; }
+    .pf-field .hint { font-size:11px; color:var(--muted); font-weight:400; margin-left:6px; }
+    .pf-field textarea { width:100%; font-size:13px; line-height:1.6; padding:8px 10px;
+      border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink);
+      resize:vertical; min-height:46px; font-family:inherit; }
+    .pf-field.auto textarea { background:#f8fafc; }
+    .pf-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    .pf-msg { font-size:12px; color:var(--ok); margin-top:8px; min-height:16px; }
+
+    /* ---- 内容日历面板 ---- */
+    .cal-sug { background:#fffbeb; border:1px solid #fde68a; border-radius:8px;
+      padding:8px 10px; font-size:13px; color:#92400e; margin-bottom:10px; }
+    .cal-fests { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+    .cal-fest { font-size:12px; background:#f3f4f6; border-radius:14px; padding:3px 10px; color:var(--muted); }
+    .cal-fest b { color:var(--ink); }
+    .cal-fest.near { background:#eff6ff; color:#1e40af; }
+    .cal-day { border-top:1px solid #f3f4f6; padding:8px 0; }
+    .cal-day:first-child { border-top:none; }
+    .cal-day .d { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+    .cal-day .d b { color:var(--ink); font-size:13px; }
+    .cal-holiday { font-size:11px; color:#b45309; margin-left:6px; }
+    .cal-items { margin-top:4px; display:flex; flex-direction:column; gap:3px; }
+    .cal-item { font-size:13px; }
+    .cal-item a { color:#1d4ed8; text-decoration:none; }
+    .cal-item .st { font-size:11px; color:var(--muted); margin-left:6px; }
+
+    /* ---- 卡片平台选择 ---- */
+    .plat-row { display:flex; align-items:center; gap:8px; margin:6px 0 2px; flex-wrap:wrap; }
+    .plat-row .lbl { font-size:12px; color:var(--muted); }
+    .plat-row select { font-size:13px; min-height:36px; padding:6px 8px; }
+    .plat-hint { font-size:12px; color:var(--muted); }
+    .plat-hint.warn { color:var(--warn); }
   </style>
 </head>
 <body>
@@ -273,6 +308,59 @@
         {% endfor %}
       </div>
       {% endif %}
+    </div>
+  </details>
+
+  <!-- 账号画像 / 长期记忆 -->
+  <details class="review-panel" id="profileBox">
+    <summary>账号画像 · 长期记忆（改完下次生成生效）</summary>
+    <div class="rp-body">
+      <div class="rp-empty" style="margin-bottom:10px;">这六维会在生成、AI 重写、换标题时注入；改这里不用动代码。后两项可由「数据复盘」一键写回。</div>
+      {% for d in profile_dims %}
+      <div class="pf-field {{ 'auto' if d.key in ['title_preference','source_preference'] else '' }}">
+        <label>{{ d.label }}<span class="hint">{{ d.hint }}</span></label>
+        <textarea id="pf-{{ d.key }}" data-key="{{ d.key }}">{{ profile[d.key] or '' }}</textarea>
+      </div>
+      {% endfor %}
+      {% if profile.updated_at %}<div class="hint" style="font-size:11px;color:var(--muted);">上次修改：{{ profile.updated_at }}</div>{% endif %}
+      <div class="pf-actions">
+        <button class="primary" onclick="saveProfile()">保存画像</button>
+        <button class="ghost" onclick="syncProfile()">从复盘同步经验</button>
+      </div>
+      <div class="pf-msg" id="pfMsg">{% if profile.synced_at %}经验上次同步：{{ profile.synced_at }}{% endif %}</div>
+    </div>
+  </details>
+
+  <!-- 内容日历 + 节日节点 -->
+  <details class="review-panel" id="calendarBox">
+    <summary>内容日历 · 节日节点（近 3 周）</summary>
+    <div class="rp-body">
+      {% if cal_suggestion %}<div class="cal-sug">{{ cal_suggestion }}</div>{% endif %}
+      <div class="rp-group">
+        <h4>临近节日</h4>
+        <div class="cal-fests">
+          {% for f in cal_upcoming %}
+          <span class="cal-fest {{ 'near' if f.days_away <= 3 else '' }}">{{ f.label }} <b>{{ f.name }}</b> · {{ f.when }}</span>
+          {% else %}
+          <span class="cal-fest">近 3 周无内置节日</span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="rp-group">
+        <h4>按日期分组（共 {{ cal_days | length }} 天有稿）</h4>
+        {% for d in cal_days %}
+        <div class="cal-day">
+          <div class="d"><b>{{ d.date }}</b> · {{ d.count }} 篇{% if d.holiday %}<span class="cal-holiday">{{ d.holiday }}</span>{% endif %}</div>
+          <div class="cal-items">
+            {% for it in d['items'] %}
+            <div class="cal-item"><a href="javascript:void(0)" onclick="jumpCard('{{ it.id }}')">{{ it.title }}</a><span class="st">{{ '已通过' if it.status == 'approved' else ('待审' if it.status == 'pending' else it.status) }}</span></div>
+            {% endfor %}
+          </div>
+        </div>
+        {% else %}
+        <div class="rp-empty">还没有稿件记录日期。</div>
+        {% endfor %}
+      </div>
     </div>
   </details>
 
@@ -378,6 +466,13 @@
       {% else %}
       <button class="ok act-main" onclick="saveAnd('{{ a.id }}','approved')">保存并通过</button>
       {% endif %}
+      <div class="plat-row">
+        <span class="lbl">发布平台</span>
+        <select id="plat-{{ a.id }}" onchange="onPlatChange('{{ a.id }}')">
+          {% for p in platforms %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+        </select>
+        <span class="plat-hint" id="plathint-{{ a.id }}"></span>
+      </div>
       <button onclick="copyPlain('{{ a.id }}')">复制成品</button>
       {% if a.status == 'approved' and publish_ready %}
       {# 推到公众号草稿箱：只建草稿不群发，人还要进后台点发表 #}
@@ -482,6 +577,14 @@
 // 桌面端默认展开工具区，手机端默认收起
 (function () {
   if (window.innerWidth > 640) document.getElementById('toolsBox').open = true;
+  // 每张卡片初始化平台字数提示（函数定义在下方，靠事件/AJAX 触发时已就绪，
+  // 这里用 setTimeout 让脚本先解析完再跑）
+  setTimeout(function () {
+    document.querySelectorAll('[id^="plat-"]').forEach(function (sel) {
+      const id = sel.id.replace(/^plat-/, '');
+      if (typeof onPlatChange === 'function') onPlatChange(id);
+    });
+  }, 0);
 })();
 
 function toast(msg) {
@@ -496,6 +599,7 @@ function toast(msg) {
 // 服务端也会记住登录会话，这里是双保险（防止个别浏览器禁 cookie）。
 const PWD = new URLSearchParams(location.search).get('pwd') || '';
 window.__records = {{ analytics_records | tojson }};
+window.__platformMetas = {{ platform_metas | tojson }};
 function withPwd(path) {
   if (!PWD) return path;
   return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(PWD);
@@ -654,6 +758,56 @@ document.getElementById('titleModal').addEventListener('click', function (e) {
   if (e.target === this) closeTitleModal();
 });
 
+// ---- 多平台：切换时给标题字数提示（只提示，不改标题） ----
+function onPlatChange(id) {
+  const sel = document.getElementById('plat-' + id);
+  const hint = document.getElementById('plathint-' + id);
+  if (!sel || !hint) return;
+  const meta = (window.__platformMetas || {})[sel.value] || {};
+  const titleEl = document.getElementById('title-' + id);
+  const chars = titleEl ? titleEl.value.replace(/\s/g, '').length : 0;
+  const lo = meta.title_min, hi = meta.title_max;
+  if (!lo || !hi) { hint.textContent = meta.desc || ''; return; }
+  const verdict = chars < lo ? '偏短' : (chars > hi ? '偏长' : '合适');
+  hint.textContent = '标题 ' + chars + ' 字 · ' + verdict + '（建议 ' + lo + '-' + hi + '）';
+  hint.className = 'plat-hint' + (verdict === '合适' ? '' : ' warn');
+}
+
+// ---- 账号画像：保存 + 从复盘同步 ----
+async function saveProfile() {
+  const payload = {};
+  document.querySelectorAll('#profileBox textarea[data-key]').forEach(function (el) {
+    payload[el.dataset.key] = el.value;
+  });
+  try {
+    const r = await api('/profile/save', payload);
+    document.getElementById('pfMsg').textContent = r.ok ? '已保存，下次生成/改写/换标题生效。' : '保存失败';
+    toast(r.ok ? '画像已保存' : '保存失败');
+  } catch (e) { toast('保存失败：' + e); }
+}
+async function syncProfile() {
+  try {
+    const r = await api('/profile/sync', {});
+    if (!r.ok) { toast('同步失败'); return; }
+    if (r.synced && r.title_preference) document.getElementById('pf-title_preference').value = r.title_preference;
+    if (r.synced && r.source_preference) document.getElementById('pf-source_preference').value = r.source_preference;
+    const msg = r.synced
+      ? '已从复盘同步经验（' + (r.synced_at || '') + '），记得点「保存画像」。'
+      : '复盘样本还不足，暂无可靠经验可写回；先多录几篇数据。';
+    document.getElementById('pfMsg').textContent = msg;
+    toast(msg);
+  } catch (e) { toast('同步失败：' + e); }
+}
+
+// ---- 内容日历：跳转到对应卡片 ----
+function jumpCard(id) {
+  const card = document.getElementById('card-' + id);
+  if (!card) { toast('该稿件不在当前列表，切到「全部」再看'); return; }
+  card.scrollIntoView({behavior: 'smooth', block: 'center'});
+  card.style.outline = '2px solid #1d4ed8';
+  setTimeout(function () { card.style.outline = ''; }, 2000);
+}
+
 // ---- 发布后数据录入 ----
 let recArticleId = '';
 function openRecord(id) {
@@ -774,16 +928,23 @@ async function tryCopy(text) {
 
 let copyTextCache = '';
 let copyHtmlCache = '';
+function currentPlatform(id) {
+  const el = document.getElementById('plat-' + id);
+  return el ? el.value : '公众号';
+}
 async function copyPlain(id) {
+  const platform = currentPlatform(id);
   try {
-    const res = await fetch(withPwd('/plain/' + id));
+    const res = await fetch(withPwd('/plain/' + id + '?platform=' + encodeURIComponent(platform)));
     const data = await readJson(res);
     const text = data.content || '';
     const html = data.html || '';
     if (!text) { toast('内容为空'); return; }
     const ok = await copyRich(html, text);
     if (ok) {
-      toast('已复制排版好的正文，去公众号粘贴（标题单独填）');
+      const adv = data.title_advice || {};
+      const tmsg = adv.verdict && adv.verdict !== '合适' ? ('；标题' + adv.verdict + '（' + adv.hint + '）') : '';
+      toast('已复制「' + (data.platform || platform) + '」档正文（标题单独填）' + tmsg);
     } else {
       // 前两级都失败，弹出手动复制框（里面是排好版的可编辑区，长按复制同样带格式）
       copyTextCache = text;
@@ -807,7 +968,8 @@ document.getElementById('copyModal').addEventListener('click', function (e) {
 });
 
 async function preview(id) {
-  const res = await fetch(withPwd('/preview/' + id));
+  const platform = currentPlatform(id);
+  const res = await fetch(withPwd('/preview/' + id + '?platform=' + encodeURIComponent(platform)));
   if (res.status === 401) { toast('登录已失效，请用微信推送的链接重新打开'); return; }
   const html = await res.text();
   document.getElementById('modalBody').innerHTML = html;

@@ -369,6 +369,99 @@ def to_wechat_html(body: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 多平台适配：「一份母版 → 各平台不同档位」的轻量版。
+#
+# 为什么不做 AI 按平台改写正文：那会改变已经人工审过的内容，且每次复制都调 AI，
+# 慢又贵；真正需要区分的其实只有两件事——正文样式的兼容档位、标题的字数区间。
+# 所以这里做的是「格式适配 + 标题建议」，正文内容一个字不改，换标题仍走原来的
+# AI 流程（用户已验证过）。以后若要按平台 AI 改写标题，再在 /retitle 注入字数即可。
+#
+# 档位说明：
+#   full   公众号——导读卡片、渐隐线、01/02 序号全保留（已实测可粘贴）。
+#   simple 头条号/百家号——这两个平台对渐变和卡片底色清洗不稳定，去掉装饰，
+#          只留小标题竖线、加粗、分段这些稳的结构，粘贴不易乱。
+# ---------------------------------------------------------------------------
+PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
+    "公众号": {
+        "desc": "完整样式（导读卡片、渐隐分隔线、小标题序号）",
+        "title_words": (12, 20),
+        "level": "full",
+    },
+    "头条号": {
+        "desc": "简洁档（去装饰，兼容性优先）",
+        "title_words": (18, 30),
+        "level": "simple",
+    },
+    "百家号": {
+        "desc": "简洁档（去装饰，兼容性优先）",
+        "title_words": (16, 28),
+        "level": "simple",
+    },
+}
+DEFAULT_PLATFORM = "公众号"
+
+
+def platform_list() -> list[str]:
+    """前端下拉框用的平台列表。"""
+    return list(PLATFORM_PROFILES)
+
+
+def normalize_platform(name: str | None) -> str:
+    """未知/空平台一律回落到公众号，保证老流程不变。"""
+    return name if name in PLATFORM_PROFILES else DEFAULT_PLATFORM
+
+
+def platform_meta(platform: str | None) -> dict[str, Any]:
+    p = normalize_platform(platform)
+    lo, hi = PLATFORM_PROFILES[p]["title_words"]
+    return {
+        "name": p,
+        "desc": PLATFORM_PROFILES[p]["desc"],
+        "title_min": lo,
+        "title_max": hi,
+        "title_hint": f"建议 {lo}-{hi} 字",
+    }
+
+
+def _simplify_html(html: str) -> str:
+    """把公众号完整档降级成头条/百家号稳妥档：只去装饰，不动文字。"""
+    # 1. 渐隐分隔线（HR_STYLE / DIV_STYLE 都是带 linear-gradient 的空 section）
+    html = re.sub(r'<section style="[^"]*linear-gradient[^"]*"></section>', "", html)
+    # 2. 导读卡片底色 → 普通段落，去掉"卡片感"
+    html = html.replace(LEAD_STYLE, P_STYLE)
+    # 3. 小标题前的 01/02 序号（换平台后序号意义不大，且可能被清洗成乱码）
+    html = re.sub(
+        r'<span style="' + re.escape(H_NUM_STYLE) + r'">\d{2}</span>', "", html
+    )
+    # 4. 引用块底色 → 保留左边框和文字，去掉背景（部分客户端会把浅底渲染成色块）
+    html = html.replace(QUOTE_STYLE, QUOTE_STYLE.replace("background:#f3f6fd;", ""))
+    return html
+
+
+def to_platform_html(body: str, platform: str | None) -> str:
+    """按平台输出正文富文本。公众号=原样，头条/百家=简洁档。"""
+    html = to_wechat_html(body)
+    p = normalize_platform(platform)
+    if PLATFORM_PROFILES[p]["level"] == "simple":
+        html = _simplify_html(html)
+    return html
+
+
+def title_advice(title: str, platform: str | None) -> dict[str, Any]:
+    """当前标题在目标平台的字数是否合适（只提示，不改标题）。"""
+    meta = platform_meta(platform)
+    n = len(re.sub(r"\s", "", title or ""))
+    lo, hi = meta["title_min"], meta["title_max"]
+    if n < lo:
+        verdict = "偏短"
+    elif n > hi:
+        verdict = "偏长"
+    else:
+        verdict = "合适"
+    return {"chars": n, "verdict": verdict, "hint": meta["title_hint"]}
+
+
+# ---------------------------------------------------------------------------
 # 排版校验：公众号会过滤哪些东西，这里逐条查一遍
 #
 # 参考 isjiamu/gzh-design-skill 的做法：公众号编辑器会丢弃 <style>、class、

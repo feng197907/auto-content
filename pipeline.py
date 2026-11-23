@@ -21,6 +21,7 @@ import requests
 
 import config
 import hot_topics
+import profile as profile_mod
 
 ROOT = Path(__file__).resolve().parent
 QUEUE_PATH = ROOT / config.QUEUE_FILE
@@ -377,8 +378,7 @@ def build_prompt(item: dict[str, Any]) -> str:
         f"你是内容写手。{task}\n\n"
         f"话题：{topic}\n"
         f"{material}{source_line}\n\n"
-        f"写作领域：{config.WRITING_NICHE}\n"
-        f"风格要求：{config.WRITING_STYLE}\n\n"
+        f"{profile_mod.prompt_block()}\n\n"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -445,8 +445,7 @@ def build_optimize_prompt(
         f"结构和更实用的建议。\n\n"
         f"话题：{topic}\n"
         f"{material}{source_line}\n\n"
-        f"写作领域：{config.WRITING_NICHE}\n"
-        f"风格要求：{config.WRITING_STYLE}\n\n"
+        f"{profile_mod.prompt_block()}\n\n"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1588,7 +1587,7 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
         f"原标题：{topic}\n"
         f"{material}\n\n"
         f"文章正文（节选）：\n{body}\n\n"
-        f"写作领域：{config.WRITING_NICHE}\n\n"
+        f"{profile_mod.prompt_block(mode='title')}\n\n"
         f"{config.TITLE_VARIANTS_RULE}"
     )
 
