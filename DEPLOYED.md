@@ -958,3 +958,40 @@ crontab -l
   筛选栏 HTML 四个选项渲染正确。队列每次测试前后备份恢复，未污染。无临时测试文件。
 - **服务器生效**：`git pull` + `systemctl restart auto-content`。老稿件会自动按标题临时归类，
   不必重新生成。
+
+---
+
+## 四十二、三条内容线每日排期：早报5 + 副业2 + GitHub每3天1（2026-11-23）
+
+- **需求**（用户定档，对应审核页三个栏目 tab）：
+  1. AI早报：每天 5 条；
+  2. AI副业：每天 2 条；
+  3. GitHub精选：每 3 天 1 条。
+  全部生成进 pending 待审队列，由用户逐条审核，不自动发布。
+- **配置**（`config.py`，均可 .env 覆盖）：
+  - `DAILY_NEWS_COUNT=5`、`DAILY_SIDE_BIZ_COUNT=2`；
+  - `BATCH_SIZE` 改为两者之和（=7），网页端下拉默认跟随；
+  - `GITHUB_COLUMN_INTERVAL_DAYS=3`、`COLUMN_STATE_FILE=data/column_state.json`。
+- **3天节奏的实现**：`pipeline.github_column_due()` 读状态文件里 `last_github_date`，
+  距今满 N 天才到期；首次无记录立即到期出第一篇。生成成功后 `mark_github_generated()`
+  登记日期。为什么不用队列判断：待审稿 3 天就被清理，稿一被清就误判成"从没出过"，
+  会天天生成——状态文件不受清理影响。网页手动生成也走同一判断，避免多点几次就天天出专栏。
+- **按栏目抓稿**：`pipeline.fetch_scheduled_items(quotas)` 独立于旧的 `fetch_topic_items`
+  （后者保留给网页手动生成）。三类各抓各的：
+  - GitHub：到期抓 1 篇高星项目，走专用提示词；
+  - 副业：公众号搜索关键词（已含"AI副业/被动收入"）> 热榜命中副业词 > 16 条兜底词库；
+    兜底词按日期轮换 + 队列去重，规避搜狗验证码导致天天重复；
+  - 早报：热榜带摘要（公众号结果最多留 1 条防洗稿）> RSS > 领域词，跳过副业词避免串台；
+  - `take()` 统一给每个候选预打 `column`，跨栏目 url/title 去重。
+- **daily_job**：`--count` 默认改为 None → 走栏目配额；显式传值退回旧的按总量补稿。
+  日志打印各栏目实际篇数；推送仍是把 pending 稿链接发微信。
+- **验证**（本地 demo，未调 AI、队列测试前后备份恢复）：
+  3天判断 6 项 PASS（首次/1天/3天/超3天/登记重置/配额计算）；
+  栏目抓稿分类 PASS（副业2条全命中副业词、早报5条全不命中、跨栏目无重复）；
+  端到端 run 生成 7 篇、分布 5+2、全 pending、都有合法 column；
+  审核页渲染 PASS（下拉默认7、筛选四选项、栏目标签）。无临时测试文件。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。cron 不用改（仍每天 8:00 跑
+  daily_job，现在默认按新配额）。想改数量在 .env 写 `DAILY_NEWS_COUNT` / `DAILY_SIDE_BIZ_COUNT` /
+  `GITHUB_COLUMN_INTERVAL_DAYS`，不写用默认值。
+- **注意**：`data/column_state.json` 要能写（运行用户对 data/ 有写权限）；首次上线当天就会出一篇
+  GitHub 专栏（无历史记录视为到期），之后按 3 天节奏。

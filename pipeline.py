@@ -25,6 +25,7 @@ import profile as profile_mod
 
 ROOT = Path(__file__).resolve().parent
 QUEUE_PATH = ROOT / config.QUEUE_FILE
+COLUMN_STATE_PATH = ROOT / config.COLUMN_STATE_FILE
 
 def classify_column(item: dict[str, Any]) -> str:
     """给选题/稿件判定所属栏目：github / ai_sidebiz / ai_news。
@@ -145,6 +146,55 @@ def save_queue(queue: list[dict[str, Any]]) -> None:
     )
 
 
+def load_column_state() -> dict[str, Any]:
+    """读栏目运行状态（目前只存 GitHub 专栏上次生成日期）。"""
+    if not COLUMN_STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(COLUMN_STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_column_state(state: dict[str, Any]) -> None:
+    """写栏目运行状态。"""
+    COLUMN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    COLUMN_STATE_PATH.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def github_column_due(now: datetime | None = None) -> bool:
+    """GitHub 专栏是否到期（距上次生成满 N 天）。
+
+    为什么要单独状态文件：待审核稿 3 天就被清理，如果只看队列里有没有
+    github 稿，稿一被清掉就误判成"从没出过"，会天天生成。状态文件不受清理影响。
+
+    首次运行（无记录）视为到期，立刻出第一篇。
+    """
+    if not getattr(config, "USE_GITHUB_COLUMN", True):
+        return False
+    state = load_column_state()
+    last = str(state.get("last_github_date", "")).strip()[:10]
+    if not last:
+        return True
+    try:
+        last_day = datetime.strptime(last, "%Y-%m-%d")
+    except ValueError:
+        return True
+    gap = ((now or datetime.now()).date() - last_day.date()).days
+    return gap >= getattr(config, "GITHUB_COLUMN_INTERVAL_DAYS", 3)
+
+
+def mark_github_generated(now: datetime | None = None) -> None:
+    """登记本次已生成 GitHub 专栏，重置倒计时。"""
+    state = load_column_state()
+    state["last_github_date"] = (now or datetime.now()).date().isoformat()
+    save_column_state(state)
+
+
 def _smart_summary(raw: str, limit: int = 400) -> str:
     """压空白并按句挑选摘要，优先保住"含数字/版本号"的句子。
 
@@ -248,8 +298,143 @@ def topic_blocked(item: dict[str, Any]) -> bool:
     return False
 
 
+def _is_sidebiz(item: dict[str, Any]) -> bool:
+    """选题是否属于副业栏（标题/摘要命中副业词）。"""
+    text = f"{item.get('title', '')} {item.get('topic', '')} {item.get('desc', '') or ''}"
+    return any(w in text for w in config.SIDE_BIZ_KEYWORDS)
+
+
+def build_daily_quotas(now: datetime | None = None) -> dict[str, int]:
+    """算今天各栏目该生成几篇。daily_job 每天调用一次。
+
+    GitHub 专栏按"距上次满 3 天"到期才出；早报/副业按配置每天固定量。
+    """
+    return {
+        "github": (
+            min(getattr(config, "DAILY_GITHUB_COLUMN", 1), 1)
+            if github_column_due(now)
+            else 0
+        ),
+        "ai_news": getattr(config, "DAILY_NEWS_COUNT", 5),
+        "ai_sidebiz": getattr(config, "DAILY_SIDE_BIZ_COUNT", 2),
+    }
+
+
+def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
+    """按三条内容线的配额抓选题，每个候选预打 column 标记。
+
+    与 fetch_topic_items（网页手动生成用）分开：这里要为副业栏定向找素材，
+    并让早报避开副业词，否则 classify_column 会把两类稿串台。
+    顺序：GitHub 专栏 → 副业（素材稀缺先挑）→ 早报（素材充足后补）。
+    """
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def take(
+        candidates: list[dict[str, Any]],
+        quota: int,
+        column: str,
+        sidebiz_only: bool = False,
+        skip_sidebiz: bool = False,
+    ) -> int:
+        """按配额取候选，返回实际新增数。带硬过滤、栏目标记与跨栏目去重。"""
+        added = 0
+        for candidate in candidates:
+            if added >= quota:
+                break
+            if topic_blocked(candidate):
+                continue
+            is_biz = _is_sidebiz(candidate)
+            if sidebiz_only and not is_biz:
+                continue
+            if skip_sidebiz and is_biz:
+                continue
+            key = (candidate.get("url") or candidate.get("title") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            row = dict(candidate)
+            row["column"] = column
+            items.append(row)
+            added += 1
+        return added
+
+    # 1. GitHub 深度专栏：到期当天 1 篇，走专用提示词
+    gh_quota = max(0, int(quotas.get("github", 0)))
+    if gh_quota > 0:
+        try:
+            recommended = {
+                str(a.get("url", "")).rstrip("/")
+                for a in load_queue()
+                if a.get("column") == "github" and a.get("url")
+            }
+        except Exception:  # noqa: BLE001 - 去重失败不该挡住生成
+            recommended = set()
+        gh = hot_topics.fetch_github(
+            gh_quota,
+            min_stars=getattr(config, "GITHUB_COLUMN_MIN_STARS", 1000),
+            column=True,
+            exclude_urls=recommended,
+        )
+        take(gh, gh_quota, "github")
+
+    # 2. AI 副业：公众号搜索（关键词已含副业词）> 热榜命中副业词的 > 兜底词库
+    biz_quota = max(0, int(quotas.get("ai_sidebiz", 0)))
+    if biz_quota > 0:
+        biz_pool: list[dict[str, Any]] = []
+        if getattr(config, "USE_WECHAT_SEARCH", True):
+            try:
+                biz_pool.extend(hot_topics.fetch_wechat_search(max(biz_quota * 3, 9)))
+            except Exception as exc:  # noqa: BLE001 - 单源挂了不影响其它源
+                print(f"  副业栏·公众号搜索失败：{exc}")
+        try:
+            biz_pool.extend(
+                x for x in hot_topics.collect(max(biz_quota * 4, 12), require_desc=True)
+                if _is_sidebiz(x)
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  副业栏·热榜抓取失败：{exc}")
+        # 兜底词库按日期轮换，并跳过队列里最近用过的题——
+        # 公众号搜索常触发验证码，兜底词是高频路径，不轮换就会天天出同样两条。
+        try:
+            used_biz = {
+                str(a.get("topic") or a.get("title", ""))
+                for a in load_queue()
+                if a.get("column") == "ai_sidebiz"
+            }
+        except Exception:  # noqa: BLE001
+            used_biz = set()
+        all_fallback = config.SIDE_BIZ_FALLBACK_TOPICS
+        offset = datetime.now().day % len(all_fallback) if all_fallback else 0
+        rotated = all_fallback[offset:] + all_fallback[:offset]
+        fresh = [t for t in rotated if t not in used_biz] or rotated
+        biz_pool.extend(
+            {"title": t, "source": "副业词库", "hot": 0} for t in fresh
+        )
+        take(biz_pool, biz_quota, "ai_sidebiz", sidebiz_only=True)
+
+    # 3. AI 早报：热榜带摘要优先（公众号结果最多留 1 条防洗稿），再 RSS / 兜底
+    news_quota = max(0, int(quotas.get("ai_news", 0)))
+    if news_quota > 0:
+        hot = hot_topics.collect(max(news_quota * 2, 8), require_desc=True)
+        wechat_rows = [x for x in hot if str(x.get("source", "")).startswith("公众号")]
+        other_rows = [x for x in hot if not str(x.get("source", "")).startswith("公众号")]
+        added = take(other_rows + wechat_rows[:1], news_quota, "ai_news", skip_sidebiz=True)
+        if added < news_quota:
+            added += take(
+                _fetch_rss_items(news_quota), news_quota - added, "ai_news", skip_sidebiz=True
+            )
+        if added < news_quota:
+            added += take(
+                [{"title": t, "source": "领域词库", "hot": 0} for t in config.FALLBACK_TOPICS],
+                news_quota - added, "ai_news", skip_sidebiz=True,
+            )
+
+    return items
+
+
 def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
-    """抓选题，返回带来源的信息。
+    """抓选题（网页手动生成用旧逻辑），返回带来源的信息。
 
     国内源优先、且"有真实素材优先"的分层策略：
       1. 全网多平台热榜（知乎/百度/微博/公众号/B站/抖音/快手/头条）里技术话题：约 50%
@@ -265,13 +450,10 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # 0. GitHub 深度专栏：每天固定占 DAILY_GITHUB_COLUMN 篇，放在队列最前面。
+    # 0. GitHub 深度专栏：到期才占 1 篇（默认每 3 天），放队列最前面。
     #    跟第 6 步"GitHub 当热点线索"是两回事，互不冲突（专栏走专用提示词）。
-    column_quota = (
-        min(getattr(config, "DAILY_GITHUB_COLUMN", 1), limit)
-        if getattr(config, "USE_GITHUB_COLUMN", False)
-        else 0
-    )
+    #    网页手动生成也走这里，必须同样受 3 天节奏约束，否则多点几次就天天出专栏。
+    column_quota = min(getattr(config, "DAILY_GITHUB_COLUMN", 1), limit) if github_column_due() else 0
     if column_quota > 0:
         # 去重：已推荐过的仓库不再重复上（读队列里 column=github 的 url）
         try:
@@ -1957,13 +2139,18 @@ def run_cleanup() -> int:
 
 
 def run(
-    count: int, demo: bool, progress: Any | None = None
+    count: int,
+    demo: bool,
+    progress: Any | None = None,
+    quotas: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """执行一次流水线，返回本次新增的稿件列表。
 
     app.py 的网页端一键生成也调用这个函数，因此需要返回结果。
     progress(done, total, stage) 是可选进度回调：网页异步生成时用它实时
     上报阶段，避免用户盯着 0/N 以为卡死。命令行/定时任务不传，行为不变。
+    quotas 传入时按三条内容线的配额抓稿（daily_job 每日排期用）；
+    不传则走旧的按总量抓稿（网页手动生成用），两者互不影响。
     """
     def report(done: int, stage: str) -> None:
         if progress:
@@ -1976,7 +2163,15 @@ def run(
     print(f"启动流水线（{mode}），本次生成 {count} 篇：", flush=True)
     report(0, "正在抓取选题")
 
-    topic_items = fetch_topic_items(count)
+    if quotas is not None:
+        topic_items = fetch_scheduled_items(quotas)
+        plan = " + ".join(
+            f"{config.COLUMN_LABELS.get(k, k)} {v}"
+            for k, v in quotas.items() if v > 0
+        )
+        print(f"  栏目排期：{plan or '今日无排期'}", flush=True)
+    else:
+        topic_items = fetch_topic_items(count)
     if not topic_items:
         print("没有可用选题，退出。", flush=True)
         report(0, "没有可用选题")
@@ -1987,7 +2182,8 @@ def run(
     for idx, item in enumerate(topic_items[:count], start=1):
         hot_mark = f"（热度 {item['hot']:,}）" if item["hot"] else ""
         print(
-            f"  - [{idx}/{count}] 选题: {item['title']} [{item['source']}]{hot_mark}",
+            f"  - [{idx}/{count}] 选题: {item['title']} [{item['source']}]"
+            f"[{config.COLUMN_LABELS.get(item.get('column', ''), '-')}]{hot_mark}",
             flush=True,
         )
         report(idx - 1, f"正在写第 {idx}/{count} 篇")
@@ -2000,6 +2196,9 @@ def run(
     report(len(created), "正在保存队列")
     queue, removed = cleanup_queue(queue)
     save_queue(queue)
+    # GitHub 专栏确实写出来了才登记，避免抓取失败却把倒计时重置掉
+    if any(a.get("column") == "github" for a in created):
+        mark_github_generated()
     print(
         f"完成：新增 {len(created)} 篇，清理 {removed} 篇，"
         f"队列共 {len(queue)} 篇。"

@@ -379,8 +379,9 @@
         <span class="lbl">立即写</span>
         <select id="genCount">
           <option value="3">3 篇</option>
-          <option value="5" selected>5 篇</option>
-          <option value="10">10 篇</option>
+          <option value="5" {{ 'selected' if daily_total == 5 else '' }}>5 篇</option>
+          <option value="7" {{ 'selected' if daily_total == 7 else '' }}>7 篇 · 每日配额</option>
+          <option value="10" {{ 'selected' if daily_total not in [5,7] else '' }}>10 篇</option>
         </select>
         <button class="primary wide" id="genBtn" onclick="generate()">生成</button>
       </div>

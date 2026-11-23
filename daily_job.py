@@ -17,17 +17,31 @@ import argparse
 
 import config
 import notify as notifier
-from pipeline import run as run_pipeline
+from pipeline import build_daily_quotas, run as run_pipeline
 
 
-def daily(count: int, demo: bool = False) -> None:
-    """执行一次每日任务。"""
+def daily(count: int | None = None, demo: bool = False) -> None:
+    """执行一次每日任务。
+
+    count 不传时按三条内容线的每日配额生成（早报 5 + 副业 2，GitHub 到期当天 +1）；
+    显式传 --count 则退回旧的"按总量抓稿"，方便临时补稿。
+    """
     print("=== 每日任务开始 ===")
 
-    # 1. 生成稿件
+    quotas = build_daily_quotas() if count is None else None
+    plan_count = sum(quotas.values()) if quotas else count
     mode = "演示" if demo else "真实"
-    print(f"[1/2] 生成 {count} 篇（{mode}模式）")
-    created = run_pipeline(count=count, demo=demo)
+    print(f"[1/2] 生成 {plan_count} 篇（{mode}模式）")
+    if quotas:
+        print(
+            "  栏目排期："
+            + " + ".join(
+                f"{config.COLUMN_LABELS.get(k, k)} {v}"
+                for k, v in quotas.items() if v > 0
+            )
+            or "  今日无排期"
+        )
+    created = run_pipeline(count=plan_count, demo=demo, quotas=quotas)
     print(f"  新增 {len(created)} 篇")
 
     # 2. 推送微信
@@ -43,8 +57,8 @@ def main() -> None:
     parser.add_argument(
         "--count",
         type=int,
-        default=config.BATCH_SIZE,
-        help="本次生成篇数",
+        default=None,
+        help="本次生成篇数（不填=按三条栏目配额自动算；填了=临时按总量补稿）",
     )
     parser.add_argument(
         "--demo",

@@ -156,8 +156,9 @@ def ai_targets() -> list[dict[str, str]]:
         )
     return [t for t in targets if t["api_key"]]
 
-# 每次生成的文章数量（建议 3-5，精修时够挑）
-BATCH_SIZE = 5
+# 每次生成的文章数量。默认按三条内容线的每日配额自动算（见下方排期配置），
+# 命令行/py 脚本可用 --count 显式覆盖。
+# BATCH_SIZE 定义在文件下方 DAILY_NEWS_COUNT / DAILY_SIDE_BIZ_COUNT 之后。
 
 # ---- 写作方向 ----
 # 这里决定写什么。越具体，AI 写出来越能用。
@@ -443,12 +444,27 @@ SIDE_BIZ_KEYWORDS = [
     "变现", "赚钱", "增收", "接单", "AI副业", "AI 副业",
 ]
 
+# ---- 三条内容线的每日排期（2026-11-23 用户定档）----
+# 审核页三个栏目 tab 对应三条内容线，各自节奏不同：
+#   1. AI早报     ：每天 5 条（AI/科技资讯，含热榜与 RSS）
+#   2. AI副业     ：每天 2 条（定向抓副业/变现/被动收入素材）
+#   3. GitHub精选 ：每 3 天 1 条（一期讲透一个高星标项目）
+# 每天自动生成 = 早报 5 + 副业 2，GitHub 到期当天再多 1 条。
+# 全部生成后进 pending 待审队列，由用户逐条审核，不自动发布。
+DAILY_NEWS_COUNT = max(0, int(os.getenv("DAILY_NEWS_COUNT", "5")))
+DAILY_SIDE_BIZ_COUNT = max(0, int(os.getenv("DAILY_SIDE_BIZ_COUNT", "2")))
+BATCH_SIZE = DAILY_NEWS_COUNT + DAILY_SIDE_BIZ_COUNT  # 每日默认总数（不含 GitHub 到期篇）
+
 # ---- GitHub 深度专栏（2026-11-23 新增）----
-# 与上面"GitHub 当热点线索写资讯"是两回事：这是每天固定 1 篇、一期讲透一个
-# 高星标项目的独立栏目，格式统一为"是什么 + 解决什么问题 + 怎么用（可复制命令）"。
-# 想关掉就在 .env 里写 USE_GITHUB_COLUMN=0；DAILY_GITHUB_COLUMN 是每天占几篇。
+# 与上面"GitHub 当热点线索写资讯"是两回事：这是独立栏目，一期讲透一个项目，
+# 格式统一为"是什么 + 解决什么问题 + 怎么用（可复制命令）"。
+# 节奏：每 GITHUB_COLUMN_INTERVAL_DAYS 天出 1 篇（默认 3 天），到期当天自动多生成 1 篇。
+# 上次生成日期单独记在 COLUMN_STATE_FILE，不受待审稿 3 天清理影响——
+# 否则稿一被清掉就会误判成"从没出过"，变成天天生成。
 USE_GITHUB_COLUMN = os.getenv("USE_GITHUB_COLUMN", "1") == "1"
 DAILY_GITHUB_COLUMN = max(0, int(os.getenv("DAILY_GITHUB_COLUMN", "1")))
+GITHUB_COLUMN_INTERVAL_DAYS = max(1, int(os.getenv("GITHUB_COLUMN_INTERVAL_DAYS", "3")))
+COLUMN_STATE_FILE = "data/column_state.json"
 # 专栏最少 star 门槛：保证"星标较多"，低于此数不进候选
 GITHUB_COLUMN_MIN_STARS = max(100, int(os.getenv("GITHUB_COLUMN_MIN_STARS", "1000")))
 
@@ -481,6 +497,28 @@ FALLBACK_TOPICS: list[str] = [
     "买新手机别只看参数，这几个体验才是关键",
     "AI 生成内容怎么分辨真假，实用辨别方法",
     "国产芯片和系统的最新进展意味着什么",
+]
+
+# 副业栏目的兜底选题：热榜和公众号搜索都抓不到副业素材时，让 AI 基于这些题自己写。
+# 每条都带副业词，保证 classify_column 会归到 ai_sidebiz 栏。
+# 数量做够（>14 条），配合按日期轮换 + 队列去重，避免天天出同样的题。
+SIDE_BIZ_FALLBACK_TOPICS: list[str] = [
+    "普通人用 AI 做副业，哪些副业是真的能落地赚到钱的",
+    "AI 工具做内容变现的被动收入玩法，门槛和收益实测",
+    "下班后 1-2 小时能做的 AI 兼职接单，新手从哪入手",
+    "用 AI 提高副业效率的三个真实案例，别再只当玩具",
+    "AI 写作接单副业：从注册平台到拿到第一单的完整路径",
+    "用 AI 做自媒体内容变现，普通人最现实的三种方式",
+    "AI 代做 PPT / 设计接单：副业报价和获客的真实经验",
+    "被动收入新玩法：AI 生成数字产品挂机售卖的实操拆解",
+    "AI 短视频副业怎么做，剪辑自动化能省多少时间",
+    "Prompt 也能卖钱？AI 提示词变现的真实市场与门槛",
+    "AI 做知识付费副业：从选题到成交的最小可行路径",
+    "普通人做 AI 副业最容易踩的坑，先看这五个再上手",
+    "AI 工具组合拳：一个人怎么撑起一个小副业的全流程",
+    "从零开始用 AI 做电商内容，副业起步要准备什么",
+    "AI 翻译 / 校对接单副业：门槛、单价和接单渠道",
+    "用 AI 做本地生活服务副业，低成本试水的几个方向",
 ]
 
 # ---- 审核后台 ----

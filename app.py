@@ -198,6 +198,7 @@ def index() -> str:
         "review.html",
         articles=articles,
         counts=counts,
+        daily_total=config.BATCH_SIZE,
         current=status,
         column=column,
         column_labels=config.COLUMN_LABELS,
