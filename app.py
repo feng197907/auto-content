@@ -33,6 +33,7 @@ import wechat
 import publish as publish_mod
 import notify as notifier
 import toutiao_publish
+import baijia_publish
 from pipeline import (
     load_queue,
     save_queue,
@@ -233,6 +234,8 @@ def index() -> str:
         toutiao_enabled=getattr(config, "TOUTIAO_ENABLED", True),
         toutiao_ready=toutiao_publish.playwright_ready(),
         toutiao_logged_in=toutiao_publish.configured(),
+        baijia_ready=baijia_publish.playwright_ready(),
+        baijia_logged_in=baijia_publish.configured(),
     )
 
 
@@ -718,6 +721,100 @@ def toutiao_draft(article_id: str) -> Any:
     toutiao_draft_state = {"running": True, "article_id": article_id, "message": "正在存草稿…", "result": None}
     threading.Thread(
         target=_toutiao_draft_worker, args=(dict(queue[index]),), daemon=True
+    ).start()
+    return jsonify({"ok": True, "started": True})
+
+
+# ---- 百家号自动存草稿（只存草稿，不发布；发布会触发滑块）----
+baijia_draft_state: dict[str, Any] = {"running": False, "article_id": "", "message": "", "result": None}
+
+
+@app.route("/baijia/status", methods=["GET", "POST"])
+def baijia_status() -> Any:
+    """百家号能力状态：Playwright、登录态、二维码进度、存草稿进度。"""
+    return jsonify({
+        "enabled": getattr(config, "TOUTIAO_ENABLED", True),
+        "playwright_ready": baijia_publish.playwright_ready(),
+        "logged_in": baijia_publish.configured(),
+        "login": dict(baijia_publish.login_state),
+        "draft": dict(baijia_draft_state),
+    })
+
+
+@app.route("/baijia/qr")
+def baijia_qr() -> Any:
+    path = baijia_publish.QR_FILE
+    if not path.exists():
+        return jsonify({"error": "还没有二维码"}), 404
+    resp = send_file(path, mimetype="image/png", max_age=0)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.route("/baijia/login", methods=["POST"])
+def baijia_login() -> Any:
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "百家号入口已关闭（TOUTIAO_ENABLED=0）"}), 400
+    if not baijia_publish.playwright_ready():
+        return jsonify({
+            "ok": False,
+            "error": "服务器还没装 Playwright。执行：pip install playwright && "
+                     "playwright install chromium && playwright install-deps chromium",
+        }), 400
+    if baijia_publish.configured():
+        return jsonify({"ok": True, "already": True, "message": "百家号已登录"})
+    try:
+        baijia_publish.BaijiaPublisher().start_login()
+    except baijia_publish.BaijiaError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "started": True})
+
+
+def _baijia_draft_worker(article: dict[str, Any]) -> None:
+    global baijia_draft_state
+    try:
+        result = baijia_publish.BaijiaPublisher().save_draft(article)
+        queue = load_queue()
+        index = find_article(queue, article.get("id", ""))
+        if index != -1:
+            queue[index]["baijia_draft_id"] = "1"
+            queue[index]["baijia_draft_url"] = result.get("draft_url", "")
+            queue[index]["baijia_draft_at"] = datetime.now().isoformat(timespec="seconds")
+            save_queue(queue)
+        baijia_draft_state = {
+            "running": False, "article_id": article.get("id", ""),
+            "message": result.get("message", "已存草稿"), "result": result,
+        }
+    except Exception as exc:  # noqa: BLE001
+        baijia_draft_state = {
+            "running": False, "article_id": article.get("id", ""),
+            "message": f"存草稿失败：{exc}", "result": None,
+        }
+
+
+@app.route("/baijia/draft/<article_id>", methods=["POST"])
+def baijia_draft(article_id: str) -> Any:
+    """把审核通过的稿件存成百家号草稿（异步，前端轮询）。"""
+    global baijia_draft_state
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "百家号入口已关闭"}), 400
+    if baijia_draft_state.get("running"):
+        return jsonify({"ok": False, "error": "正在存草稿，请稍候"}), 409
+
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+    if queue[index].get("status") != "approved":
+        return jsonify({"ok": False, "error": "先审核通过再存草稿"}), 400
+    if not baijia_publish.playwright_ready():
+        return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
+    if not baijia_publish.configured():
+        return jsonify({"ok": False, "error": "百家号还没登录，先点「百家号登录」扫码"}), 400
+
+    baijia_draft_state = {"running": True, "article_id": article_id, "message": "正在存草稿…", "result": None}
+    threading.Thread(
+        target=_baijia_draft_worker, args=(dict(queue[index]),), daemon=True
     ).start()
     return jsonify({"ok": True, "started": True})
 

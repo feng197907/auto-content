@@ -15,9 +15,11 @@ data/*.bak*
 output/
 data/covers/
 
-# 头条号登录态（浏览器 profile 含 cookie，绝不入库）与扫码二维码
+# 头条号/百家号登录态（浏览器 profile 含 cookie，绝不入库）与扫码二维码
 data/toutiao_profile/
 data/toutiao_qr.png
+data/baijia_profile/
+data/baijia_qr.png
 
 # 含真实服务器信息的本地运维备份
 DEPLOYED.local.bak
