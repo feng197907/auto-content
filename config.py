@@ -427,6 +427,11 @@ KEEP_APPROVED_DAYS = 30
 # 发布目标平台（仅用于成品标注，不做自动发布）
 TARGET_PLATFORMS = ["头条号", "百家号", "公众号"]
 
+# 正文末尾是否保留「信息来源：xxx」出处标注。
+# 默认关闭：成品里挂别人的公众号名会把读者引走（用户 2026-11-23 反馈）；
+# 确有合规需要时，在 .env 里写 SHOW_SOURCE_NOTE=1 即可恢复。
+SHOW_SOURCE_NOTE = os.getenv("SHOW_SOURCE_NOTE", "0") == "1"
+
 # 成品预览里显示的署名
 # 改这一个值即可换署名；也可在 .env 里写 SITE_AUTHOR=你的账号名 覆盖（不用改代码）
 SITE_AUTHOR = os.getenv("SITE_AUTHOR", "Plan B 的AI笔记")

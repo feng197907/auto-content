@@ -388,7 +388,8 @@ def build_prompt(item: dict[str, Any]) -> str:
         "4. 素材没有说明原因、动机、背景时，绝对不要替它推测。"
         "禁止写'技术实力雄厚''团队经验丰富''市场需求旺盛'这类没有依据的归因，"
         "宁可直说'具体原因未披露'\n"
-        "5. 如果有原文链接，在文末用「信息来源」标注出处\n"
+        "5. 不要在文末写「信息来源」「出处」「原文链接」或任何来源标注——"
+        "这类信息会在排版时被统一去掉，写进去只会是废话\n"
         "6. 篇幅不够时按「怎么把文章写厚而不注水」那五条展开，"
         "绝不靠编造事实或堆形容词凑字数\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
@@ -455,7 +456,8 @@ def build_optimize_prompt(
         "4. 素材没有说明原因、动机、背景时，绝对不要替它推测。"
         "禁止写'技术实力雄厚''团队经验丰富''市场需求旺盛'这类没有依据的归因，"
         "宁可直说'具体原因未披露'\n"
-        "5. 如果有原文链接，在文末用「信息来源」标注出处\n"
+        "5. 不要在文末写「信息来源」「出处」「原文链接」或任何来源标注——"
+        "这类信息会在排版时被统一去掉，写进去只会是废话\n"
         "6. 素材撑不满时宁可写短，绝不用编造的内容凑字数\n\n"
         "优化要求：\n"
         "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
@@ -926,7 +928,11 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
     return title, tidy_spaces(
         cap_bold(
             dedupe_repeated(
-                strip_meta_notes(unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body))))
+                strip_source_note(
+                    strip_meta_notes(
+                        unwrap_paragraph_bold(ensure_bold(split_long_paragraphs(body)))
+                    )
+                )
             )
         )
     )
@@ -1251,6 +1257,41 @@ def strip_meta_notes(body: str) -> str:
     body = re.sub(
         r"<p>\s*(以下|下面)是[^<]{0,24}(扩写|改写|优化|版本|正文)[^<]*</p>", "", body
     )
+    return body
+
+
+def strip_source_note(body: str) -> str:
+    """删掉正文末尾的「信息来源/出处/原文链接」标注段。
+
+    用户 2026-11-23 反馈：成品里挂着别人的公众号名（如"信息来源：公众号·某某《...》"）
+    会把读者引到对方那里，造成流失。默认关掉，config.SHOW_SOURCE_NOTE=1 时保留。
+
+    只在正文末尾处理，避免误删正文中间正常引用的"来源"字样。命中的两种形态：
+      1. 独立小标题 <h2>信息来源</h2> / <h2>出处</h2> 连同其后直到下一个标题的内容；
+      2. 结尾的 <p>信息来源：.../出处：.../原文链接：...</p> 段落。
+    """
+    if config.SHOW_SOURCE_NOTE:
+        return body
+
+    # 来源标注一律在正文末尾，从命中处删到结尾即可。覆盖模型各种写法：
+    # <h2>信息来源</h2>、<p>信息来源</p>、<p>信息来源：xxx</p>，以及后面拖着的链接段。
+    source_head = (
+        r"<\s*(?:h[1-6]|p|div|section)[^>]*>\s*"
+        r"(?:信息来源与声明|信息来源|原文出处|参考资料|来源|出处)"
+        r"\s*(?:[：:][^<]*)?\s*</\s*(?:h[1-6]|p|div|section)\s*>"
+    )
+    cut = re.search(source_head, body, flags=re.S | re.I)
+    if cut:
+        if cut.start() >= len(body) * 0.6:
+            body = body[: cut.start()].rstrip()
+        else:
+            body = re.sub(
+                source_head + r"\s*(?:<p[^>]*>.*?</p>\s*){0,3}",
+                "",
+                body,
+                count=1,
+                flags=re.S | re.I,
+            )
     return body
 
 

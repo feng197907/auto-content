@@ -19,6 +19,37 @@ from html import escape
 from html.parser import HTMLParser
 from typing import Any
 
+import config
+
+
+def _strip_source_note(body: str) -> str:
+    """输出前兜底删掉正文末尾的「信息来源/出处/原文链接」标注。
+
+    放在排版层是为了覆盖老稿：队列里已通过的稿子正文里还留着来源行，
+    不会重新走生成链。预览/复制/推草稿箱都过这里，一处改动三个出口生效。
+    config.SHOW_SOURCE_NOTE=1 时保留（有合规需要时再开）。
+    """
+    if not body or getattr(config, "SHOW_SOURCE_NOTE", False):
+        return body
+    # 文末「信息来源 / 出处」整段删除。
+    # 来源标注一律在正文末尾，所以从标题标签一路删到结尾即可——这样能覆盖
+    # 模型各种写法：<h2>信息来源</h2>、<p>信息来源</p>、<p>信息来源：xxx</p>，
+    # 以及后面拖着的「来源：... 原文链接：<a>...」_wrapper 嵌套段落。
+    source_head = (
+        r"<\s*(?:h[1-6]|p|div|section)[^>]*>\s*"
+        r"(?:信息来源与声明|信息来源|原文出处|参考资料|来源|出处)"
+        r"\s*(?:[：:][^<]*)?\s*</\s*(?:h[1-6]|p|div|section)\s*>"
+    )
+    cut = re.search(source_head, body, flags=re.S | re.I)
+    if cut:
+        # 只在命中位置靠后（全文 60% 之后）才当成文末来源，避免误删正文中间的引用
+        if cut.start() >= len(body) * 0.6:
+            body = body[: cut.start()].rstrip()
+        else:
+            # 靠前但确实是纯来源行：只删这一行 + 紧跟的链接段，不动正文
+            body = re.sub(source_head + r"\s*(?:<p[^>]*>.*?</p>\s*){0,3}", "", body, count=1, flags=re.S | re.I)
+    return body
+
 # 正文 17px / 行高 1.95 / 字距 .4px —— 手机上升一档更好读，段落间距给足
 H_STYLE = (
     "font-size:19px;font-weight:700;color:#111827;line-height:1.6;"
@@ -304,6 +335,7 @@ def to_wechat_html(body: str) -> str:
     if not body or not body.strip():
         return ""
 
+    body = _strip_source_note(body)
     raw = body.strip()
     if "<" not in raw:
         return _wrap_plain_text(raw)
@@ -573,6 +605,7 @@ def to_plain_text(body: str) -> str:
     """正文 → 纯文本（复制到不认格式的平台时用）。"""
     if not body:
         return ""
+    body = _strip_source_note(body)
     text = re.sub(r"<br\s*/?>", "\n", body)
     text = re.sub(r"</(p|h1|h2|h3|h4|li|blockquote|div|section)>", "\n", text)
     text = re.sub(r"<[^>]+>", "", text)
