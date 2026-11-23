@@ -40,6 +40,7 @@ from pipeline import (
     regenerate_titles,
     apply_title,
     ai_tone_check,
+    classify_column,
 )
 
 app = Flask(__name__)
@@ -166,6 +167,16 @@ def index() -> str:
     if status != "all":
         queue = [item for item in queue if item["status"] == status]
 
+    # 栏目筛选：github / ai_news / ai_sidebiz。空=全部栏目。
+    # 老稿件没有 column 字段，这里用 classify_column 按标题关键词兜底归类，
+    # 只在渲染副本上补，不回写队列。
+    column = request.args.get("column", "").strip()
+    for item in queue:
+        if not item.get("column"):
+            item["column"] = classify_column(item)
+    if column in config.COLUMN_LABELS:
+        queue = [item for item in queue if item.get("column") == column]
+
     counts = compute_stats(load_queue())
 
     # 排版校验：把「粘到公众号会不会掉格式」提前算出来，显示在卡片上。
@@ -188,6 +199,8 @@ def index() -> str:
         articles=articles,
         counts=counts,
         current=status,
+        column=column,
+        column_labels=config.COLUMN_LABELS,
         review_url=config.REVIEW_URL,
         publish_ready=publish_mod.configured(),
         analytics=analytics.summarize(),

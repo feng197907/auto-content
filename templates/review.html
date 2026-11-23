@@ -66,6 +66,11 @@
               color:var(--muted); border:1px solid var(--line); border-radius:8px;
               font-size:14px; background:#fff; }
     .tabs a.on { background:var(--primary); color:#fff; border-color:var(--primary); font-weight:600; }
+    /* 栏目筛选：比状态 tab 小一号，胶囊样式，和主 tab 拉开层次 */
+    .col-tabs { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 14px; }
+    .col-tabs a { padding:5px 12px; text-decoration:none; font-size:12px; color:var(--muted);
+                  border:1px solid var(--line); border-radius:999px; background:#fff; }
+    .col-tabs a.on { background:#eef2ff; color:#3730a3; border-color:#a5b4fc; font-weight:600; }
 
     /* ---- 稿件卡片 ---- */
     .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
@@ -75,7 +80,9 @@
     .badge { display:inline-block; padding:2px 8px; border-radius:5px; font-size:11px; white-space:nowrap; }
     .src-hot { background:#faece7; color:var(--warn); }
     .src-lib { background:#eef2f7; color:#475569; }
-    .col-github { background:#0f172a; color:#f8fafc; }  /* GitHub 专栏：深色徽标，和普通稿一眼区分 */
+    .col-github { background:#0f172a; color:#f8fafc; }  /* GitHub 专栏：深色徽标 */
+    .col-ai_news { background:#dbeafe; color:#1e40af; }   /* AI早报：蓝 */
+    .col-ai_sidebiz { background:#fef3c7; color:#92400e; }/* AI副业：琥珀 */
     .mode-ai { background:#e1f5ee; color:#0f766e; }
     .mode-fact { background:#e8f0fe; color:#1d4ed8; }
     /* 排版校验徽章：OK 绿、提醒黄、会掉格式红 */
@@ -388,9 +395,17 @@
   </details>
 
   <div class="tabs">
-    <a href="/?status=pending" class="{{ 'on' if current == 'pending' else '' }}">待审核</a>
-    <a href="/?status=approved" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
-    <a href="/?status=all" class="{{ 'on' if current == 'all' else '' }}">全部</a>
+    <a href="/?status=pending{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'pending' else '' }}">待审核</a>
+    <a href="/?status=approved{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
+    <a href="/?status=all{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'all' else '' }}">全部</a>
+  </div>
+
+  {# 栏目筛选：跟状态 tab 正交，链接互相保留对方参数 #}
+  <div class="col-tabs">
+    <a href="/?status={{ current }}{% if current == 'all' %}{% endif %}" class="{{ 'on' if not column else '' }}">全部栏目</a>
+    {% for key, label in column_labels.items() %}
+    <a href="/?status={{ current }}&column={{ key }}" class="{{ 'on' if column == key else '' }}">{{ label }}</a>
+    {% endfor %}
   </div>
 
   {% if not articles %}
@@ -403,8 +418,8 @@
       <span class="badge {{ 's-pending' if a.status == 'pending' else 's-approved' }}">
         {{ '待审核' if a.status == 'pending' else '已通过' }}
       </span>
-      {% if a.column == 'github' %}
-      <span class="badge col-github" title="GitHub 深度专栏：一期讲透一个高星标项目">GitHub精选</span>
+      {% if a.column and column_labels.get(a.column) %}
+      <span class="badge col-{{ a.column }}">{{ column_labels[a.column] }}</span>
       {% endif %}
       <span class="badge {{ 'src-hot' if a.hot else 'src-lib' }}">
         {{ '热榜·' + a.source if a.hot else a.source }}

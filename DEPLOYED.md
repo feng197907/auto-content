@@ -934,3 +934,27 @@ crontab -l
   在 `.env` 里加 `GITHUB_COLUMN_MIN_STARS` / `DAILY_GITHUB_COLUMN`，不写就用默认值。
 - **注意**：本次本地实测 glm-4.7-flash 会间歇限流，本地那把 DeepSeek key 是无效的（401），
   导致第二次调用降级成事实卡——这是本地测试环境问题，服务器已配置有效 key，不受影响。
+
+---
+
+## 四十一、审核页栏目筛选：GitHub精选 / AI早报 / AI副业（2026-11-23）
+
+- **需求**：用户在三个状态 tab（待审核/已通过/全部）下加一行栏目筛选，三个筛选项对应
+  三条内容线；并明确"不用再做专栏排序"（原先想把专栏顶到队首的改动已撤销）。
+- **栏目归类**：统一用 `column` 字段，三值 `github` / `ai_news` / `ai_sidebiz`。
+  - `config.COLUMN_LABELS` 三值中文名；`config.SIDE_BIZ_KEYWORDS` 副业判定词
+    （副业/搞钱/兼职/被动收入/变现/接单等）。
+  - `pipeline.classify_column(item)`：已有 column 沿用；否则标题+摘要命中副业词归
+    `ai_sidebiz`，其余归 `ai_news`。
+  - `make_article` 生成时给每篇稿打 column（GitHub 专栏沿用 github）。
+- **审核页**：
+  - `app.py` index 读 `?column=` 过滤；老稿没 column 时用 classify_column 临时补在渲染副本
+    （不回写队列）；column 和 column_labels 传给模板。
+  - `review.html` 三个状态 tab 链接保留 column 参数；tab 下新增一行胶囊筛选
+    （全部栏目/GitHub精选/AI早报/AI副业），栏目链接保留 status 参数，两者正交组合。
+  - 卡片栏目标签由原来只显示 GitHub 改为三类都显示，各自配色（深色/蓝/琥珀）。
+- **验证**：classify_column 分类（沿用/副业命中/普通稿）3 项 PASS；Flask test_client
+  端到端 6 项 PASS（全部/github/ai_sidebiz/ai_news/状态+栏目组合/tab链接保留参数）；
+  筛选栏 HTML 四个选项渲染正确。队列每次测试前后备份恢复，未污染。无临时测试文件。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。老稿件会自动按标题临时归类，
+  不必重新生成。

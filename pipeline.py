@@ -26,6 +26,22 @@ import profile as profile_mod
 ROOT = Path(__file__).resolve().parent
 QUEUE_PATH = ROOT / config.QUEUE_FILE
 
+def classify_column(item: dict[str, Any]) -> str:
+    """给选题/稿件判定所属栏目：github / ai_sidebiz / ai_news。
+
+    - 已带 column 字段（GitHub 专栏）直接沿用；
+    - 否则标题/摘要命中副业词归 AI副业，其余归 AI早报。
+    老稿件没这个字段时，审核页也用同一函数兜底归类。
+    """
+    existing = str(item.get("column") or "").strip()
+    if existing in config.COLUMN_LABELS:
+        return existing
+    text = f"{item.get('title', '')} {item.get('topic', '')} {item.get('desc', '')}"
+    if any(word in text for word in config.SIDE_BIZ_KEYWORDS):
+        return "ai_sidebiz"
+    return "ai_news"
+
+
 def _github_column_fallback_card(item: dict[str, Any]) -> str:
     """专栏稿的降级卡：AI 不可用时，用真实字段拼一张项目速览，不编造。"""
     repo = item.get("repo") or item.get("title", "")
@@ -1662,8 +1678,8 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         "desc": desc,
         "mode": mode,
         "body": body,
-        # 专栏标记：审核页打标签、下次生成按 url 去重都靠它
-        **({"column": topic_item["column"]} if topic_item.get("column") else {}),
+        # 栏目标记：github / ai_sidebiz / ai_news，审核页三个筛选项靠它分类
+        "column": classify_column(topic_item),
         "status": "pending",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
