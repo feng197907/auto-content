@@ -161,6 +161,45 @@ class BaijiaPublisher:
 
         threading.Thread(target=self._login_worker, daemon=True).start()
 
+    # 登录二维码候选节点（百家号前端改版时按实测补这里）
+    _QR_SELECTORS = (
+        "iframe[src*='passport'], img[src*='qrcode'], "
+        ".login-qrcode img, canvas[class*='qr'], [class*='qrcode'] img"
+    )
+    # 未登录时百家号编辑页会落到「百度内容创作经营平台」落地页，要先点登录按钮
+    _LOGIN_ENTRY_SELECTORS = (
+        "button:has-text('登录')", "a:has-text('登录')",
+        "text=登录", ".login-btn", "[class*='login']:has-text('登录')",
+    )
+    _QR_REFRESH_SEC = 20
+
+    def _capture_qr(self, page: Any) -> None:
+        global login_state
+        qr = page.locator(self._QR_SELECTORS)
+        try:
+            qr.first.wait_for(state="visible", timeout=8000)
+            qr.first.screenshot(path=str(QR_FILE))
+        except Exception:
+            page.screenshot(path=str(QR_FILE))
+        login_state["qr_at"] = int(time.time())
+
+    def _enter_login(self, page: Any) -> None:
+        """从落地页进入登录页：先点「登录」按钮，等二维码出现。"""
+        page.goto(EDIT_URL, timeout=30000)
+        page.wait_for_timeout(2500)
+        # 落地页或登录浮层里找登录入口；已经出了二维码就跳过
+        if page.locator(self._QR_SELECTORS).count() == 0:
+            for sel in self._LOGIN_ENTRY_SELECTORS:
+                try:
+                    btn = page.locator(sel).first
+                    btn.wait_for(state="visible", timeout=2000)
+                    btn.click(timeout=3000)
+                    page.wait_for_timeout(2500)
+                    break
+                except Exception:
+                    continue
+        page.wait_for_timeout(1500)
+
     def _login_worker(self) -> None:
         global login_state
         try:
@@ -169,39 +208,31 @@ class BaijiaPublisher:
             with sync_playwright() as pw:
                 ctx = self._launch(pw)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                page.goto(EDIT_URL, timeout=30000)
-                page.wait_for_timeout(3000)
-                # 未登录会弹登录浮层，二维码常在 iframe 或 img 里
-                qr = page.locator(
-                    "iframe[src*='passport'], img[src*='qrcode'], "
-                    ".login-qrcode img, canvas[class*='qr'], [class*='qrcode'] img"
-                )
-                try:
-                    qr.first.wait_for(state="visible", timeout=15000)
-                    qr.first.screenshot(path=str(QR_FILE))
-                    login_state = {
-                        "status": "waiting", "message": "请用百度 App 扫码登录",
-                        "qr": True, "at": int(time.time()),
-                    }
-                except Exception:
-                    page.screenshot(path=str(QR_FILE))
-                    login_state = {
-                        "status": "waiting", "message": "请在截图中找到二维码扫码",
-                        "qr": True, "at": int(time.time()),
-                    }
-                deadline = time.time() + 300
+                self._enter_login(page)
+                login_state = {
+                    "status": "waiting", "message": "请用百度 App 扫码登录（二维码会自动刷新）",
+                    "qr": True, "at": int(time.time()),
+                }
+                self._capture_qr(page)
+                deadline = time.time() + 480
                 logged = False
+                last_qr = time.time()
                 while time.time() < deadline:
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(2000)
                     url = page.url
                     # 登录成功后回到编辑页、URL 不再含 passport/login
                     if "passport" not in url and "/login" not in url:
-                        # 再确认页面确实有编辑器，防止误判中间跳转页
                         if page.locator("div[contenteditable='true']").count() > 0:
                             logged = True
                             break
                     if login_state.get("status") == "cancelled":
                         break
+                    if time.time() - last_qr >= self._QR_REFRESH_SEC:
+                        try:
+                            self._capture_qr(page)
+                            last_qr = time.time()
+                        except Exception:
+                            pass
                 ctx.close()
 
             if logged:

@@ -372,7 +372,7 @@
       <div id="ttQrBox" style="display:none;margin-top:12px;text-align:center;">
         <img id="ttQrImg" src="/toutiao/qr" alt="头条登录二维码"
              style="max-width:220px;border:1px solid var(--line);border-radius:8px;">
-        <div class="hint" style="margin-top:6px;">用头条 App 扫码，扫完这里会自动变「登录成功」</div>
+        <div class="hint" style="margin-top:6px;">用头条 App 扫码，二维码每 20 秒自动更新；扫完这里会变「登录成功」</div>
       </div>
       {% endif %}
 
@@ -389,7 +389,7 @@
       <div id="bjQrBox" style="display:none;margin-top:12px;text-align:center;">
         <img id="bjQrImg" src="/baijia/qr" alt="百家号登录二维码"
              style="max-width:220px;border:1px solid var(--line);border-radius:8px;">
-        <div class="hint" style="margin-top:6px;">用百度 App 扫码，扫完这里会自动变「登录成功」</div>
+        <div class="hint" style="margin-top:6px;">用百度 App 扫码，二维码每 20 秒自动更新；扫完这里会变「登录成功」</div>
       </div>
       {% endif %}
     </div>
@@ -1219,7 +1219,15 @@ function pollToutiaoLogin(times) {
       const st = r.login || {};
       const state = document.getElementById('ttLoginState');
       const box = document.getElementById('ttQrBox');
-      if (box && st.qr) box.style.display = '';
+      if (box && st.qr) {
+        box.style.display = '';
+        // 二维码每 20 秒重截一次，这里带时间戳强制浏览器拉最新，避免扫到过期码
+        const img = document.getElementById('ttQrImg');
+        if (img && st.qr_at !== img.dataset.at) {
+          img.dataset.at = st.qr_at;
+          img.src = '/toutiao/qr?t=' + Date.now();
+        }
+      }
       if (state && st.message) state.textContent = st.message;
       if (st.status === 'success') {
         if (box) box.style.display = 'none';
@@ -1298,7 +1306,14 @@ function pollBaijiaLogin(times) {
       const st = r.login || {};
       const state = document.getElementById('bjLoginState');
       const box = document.getElementById('bjQrBox');
-      if (box && st.qr) box.style.display = '';
+      if (box && st.qr) {
+        box.style.display = '';
+        const img = document.getElementById('bjQrImg');
+        if (img && st.qr_at !== img.dataset.at) {
+          img.dataset.at = st.qr_at;
+          img.src = '/baijia/qr?t=' + Date.now();
+        }
+      }
       if (state && st.message) state.textContent = st.message;
       if (st.status === 'success') {
         if (box) box.style.display = 'none';
@@ -1384,6 +1399,24 @@ async function genCover(id, btn) {  if (!btn) btn = event && event.target;
   if (generating) {
     setTimeout(function () { location.reload(); }, 10000);
   }
+})();
+
+// 页面刷新后自动续上正在进行的扫码登录：后台线程还在 waiting，前端不能断了轮询。
+(async function resumeLoginPolls() {
+  async function resume(statusUrl, pollFn, boxId) {
+    const box = document.getElementById(boxId);
+    if (!box) return; // 该平台未启用 playwright，面板不存在
+    try {
+      const r = await api(statusUrl, {});
+      const st = r.login || {};
+      if (st.status === 'waiting' && st.qr) {
+        box.style.display = '';
+        pollFn(0);
+      }
+    } catch (e) { /* 忽略：下次手动点登录即可 */ }
+  }
+  await resume('/toutiao/status', pollToutiaoLogin, 'ttQrBox');
+  await resume('/baijia/status', pollBaijiaLogin, 'bjQrBox');
 })();
 </script>
 </body>

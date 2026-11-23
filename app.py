@@ -662,8 +662,8 @@ def toutiao_login() -> Any:
     if not toutiao_publish.playwright_ready():
         return jsonify({
             "ok": False,
-            "error": "服务器还没装 Playwright。执行：pip install playwright && "
-                     "playwright install chromium && playwright install-deps chromium",
+            "error": "服务器还没装 Playwright。先 pip install playwright；"
+                     "Alibaba Cloud Linux 用 playwright install chromium 后按 DEPLOYED.md 第49节补系统库",
         }), 400
     if toutiao_publish.configured():
         return jsonify({"ok": True, "already": True, "message": "头条已登录"})
@@ -758,8 +758,8 @@ def baijia_login() -> Any:
     if not baijia_publish.playwright_ready():
         return jsonify({
             "ok": False,
-            "error": "服务器还没装 Playwright。执行：pip install playwright && "
-                     "playwright install chromium && playwright install-deps chromium",
+            "error": "服务器还没装 Playwright。先 pip install playwright；"
+                     "Alibaba Cloud Linux 用 playwright install chromium 后按 DEPLOYED.md 第49节补系统库",
         }), 400
     if baijia_publish.configured():
         return jsonify({"ok": True, "already": True, "message": "百家号已登录"})

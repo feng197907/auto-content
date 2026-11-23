@@ -166,8 +166,29 @@ class ToutiaoPublisher:
 
         threading.Thread(target=self._login_worker, daemon=True).start()
 
+    # 登录浮层里的二维码节点：头条前端改版时按实测补这里
+    _QR_SELECTORS = (
+        "iframe[src*='sso'], .login-qrcode img, img[src*='qrcode'], "
+        "canvas[class*='qr'], .dui-qrcode canvas, img[class*='qrcode']"
+    )
+    # 二维码会定时自动刷新，静态截图几十秒就失效；轮询期间按这个间隔重截
+    _QR_REFRESH_SEC = 20
+
+    def _capture_qr(self, page: Any) -> None:
+        """把当前登录页的二维码截到 QR_FILE；每轮重截，避免用户扫到过期码。"""
+        global login_state
+        qr = page.locator(self._QR_SELECTORS)
+        try:
+            qr.first.wait_for(state="visible", timeout=8000)
+            qr.first.screenshot(path=str(QR_FILE))
+        except Exception:
+            # 选择器没命中：退而求其次截整页，用户可能要放大看
+            page.screenshot(path=str(QR_FILE))
+        # 打时间戳，前端据此拉最新图（防止浏览器缓存用到过期码）
+        login_state["qr_at"] = int(time.time())
+
     def _login_worker(self) -> None:
-        """后台：打开登录页 → 截二维码 → 轮询扫码结果 → 写登录态。"""
+        """后台：打开登录页 → 截二维码（周期内重截）→ 轮询扫码结果 → 写登录态。"""
         global login_state
         try:
             from playwright.sync_api import sync_playwright
@@ -177,37 +198,31 @@ class ToutiaoPublisher:
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 page.goto(f"{TT_BASE}/profile_v4/graphic/publish", timeout=30000)
                 page.wait_for_timeout(3000)
-                # 还没登录时头条会把二维码挂在登录浮层里；选择器按常见结构兜底
-                qr = page.locator(
-                    "iframe[src*='sso'], .login-qrcode img, img[src*='qrcode'], "
-                    "canvas[class*='qr'], .dui-qrcode canvas, img[class*='qrcode']"
-                )
-                try:
-                    qr.first.wait_for(state="visible", timeout=15000)
-                    qr.first.screenshot(path=str(QR_FILE))
-                    login_state = {
-                        "status": "waiting", "message": "请用头条 App 扫码登录",
-                        "qr": True, "at": int(time.time()),
-                    }
-                except Exception:
-                    # 二维码选择器没命中：退而求其次截整页，用户可能要放大看
-                    page.screenshot(path=str(QR_FILE))
-                    login_state = {
-                        "status": "waiting", "message": "请在截图中找到二维码扫码",
-                        "qr": True, "at": int(time.time()),
-                    }
+                login_state = {
+                    "status": "waiting", "message": "请用头条 App 扫码登录（二维码会自动刷新）",
+                    "qr": True, "at": int(time.time()),
+                }
+                self._capture_qr(page)
 
-                # 轮询最多 5 分钟，等用户扫码
-                deadline = time.time() + 300
+                # 轮询最多 8 分钟；期间每 20 秒重截二维码，保证用户扫的是有效码。
+                # 前端 img 带时间戳防缓存，会跟着拉最新截图。
+                deadline = time.time() + 480
                 logged = False
+                last_qr = time.time()
                 while time.time() < deadline:
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(2000)
                     url = page.url
                     if "login" not in url and "passport" not in url:
                         logged = True
                         break
                     if login_state.get("status") == "cancelled":
                         break
+                    if time.time() - last_qr >= self._QR_REFRESH_SEC:
+                        try:
+                            self._capture_qr(page)
+                            last_qr = time.time()
+                        except Exception:
+                            pass  # 页面正在跳转时截图失败，下轮再试
                 ctx.close()
 
             if logged:
