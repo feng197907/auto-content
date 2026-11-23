@@ -172,6 +172,10 @@ def index() -> str:
     # 老稿件没有 column 字段，这里用 classify_column 按标题关键词兜底归类，
     # 只在渲染副本上补，不回写队列。
     column = request.args.get("column", "").strip()
+    if status == "all":
+        # 「全部」tab 不参与栏目筛选：即使 URL 带了 column 也忽略，
+        # 配合模板隐藏筛选栏，保证这一页看到的就是全部稿件。
+        column = ""
     for item in queue:
         if not item.get("column"):
             item["column"] = classify_column(item)

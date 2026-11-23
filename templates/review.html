@@ -404,16 +404,19 @@
   <div class="tabs">
     <a href="/?status=pending{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'pending' else '' }}">待审核</a>
     <a href="/?status=approved{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
-    <a href="/?status=all{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'all' else '' }}">全部</a>
+    {# 「全部」tab 不参与栏目筛选，链接不带 column #}
+    <a href="/?status=all" class="{{ 'on' if current == 'all' else '' }}">全部</a>
   </div>
 
-  {# 栏目筛选：跟状态 tab 正交，链接互相保留对方参数 #}
+  {# 栏目筛选：只在待审核/已通过下显示；「全部」tab 下隐藏，显示全部稿件 #}
+  {% if current != 'all' %}
   <div class="col-tabs">
-    <a href="/?status={{ current }}{% if current == 'all' %}{% endif %}" class="{{ 'on' if not column else '' }}">全部栏目</a>
+    <a href="/?status={{ current }}" class="{{ 'on' if not column else '' }}">全部栏目</a>
     {% for key, label in column_labels.items() %}
     <a href="/?status={{ current }}&column={{ key }}" class="{{ 'on' if column == key else '' }}">{{ label }}</a>
     {% endfor %}
   </div>
+  {% endif %}
 
   {% if not articles %}
   <div class="empty">这里还没有稿件。展开上面「生成 / 推送工具」点「生成」试试。</div>
