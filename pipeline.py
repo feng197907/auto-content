@@ -170,6 +170,27 @@ def _fetch_rss_items(limit: int) -> list[dict[str, Any]]:
     return items
 
 
+def topic_blocked(item: dict[str, Any]) -> bool:
+    """选题硬过滤：命中画像「不写的主题」就丢弃。
+
+    判定文本 = 标题 + 摘要。只看标题会漏——汽车稿标题常写成
+    「东风日产 NX7 预售 12.99 万元起」，本身没有"汽车/SUV"，
+    但摘要里有"SUV""大五座布局"，必须连摘要一起查。
+
+    排除词优先级高于关键词相关分：素材里出现"宁德时代电池"会命中弱相关词
+    "电池"，但那是整车消费资讯，不是这个号的选题——命中排除词一律丢弃。
+    """
+    words = profile_mod.excluded_words()
+    if not words:
+        return False
+    text = f"{item.get('title', '')} {item.get('desc', '') or ''}".lower()
+    hit = next((w for w in words if w.lower() in text), "")
+    if hit:
+        print(f"  选题过滤：「{item.get('title', '')[:32]}」命中「{hit}」，跳过")
+        return True
+    return False
+
+
 def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     """抓选题，返回带来源的信息。
 
@@ -193,6 +214,9 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
         for candidate in candidates:
             if added >= quota or len(items) >= limit:
                 break
+            # 账号定位的硬过滤——所有来源都过这一关（RSS 以前是漏网之鱼）
+            if topic_blocked(candidate):
+                continue
             key = (candidate.get("url") or candidate.get("title") or "").strip()
             if not key or key in seen:
                 continue

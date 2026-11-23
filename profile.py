@@ -8,8 +8,9 @@
 设计取舍：
   - 存储 data/profile.json，和 queue.json / analytics.json 同风格，无数据库依赖；
     被 .gitignore 的 data/*.json 覆盖，不随 git 同步（换机需单独拷）。
-  - 六维画像：定位 / 受众 / 风格 / 红线 / 标题偏好 / 选题源偏好。
-    前四维人工编辑，后两维由复盘写回（也可手改）。
+  - 七维画像：定位 / 受众 / 风格 / 红线 / 标题偏好 / 选题源偏好 / 不写的主题。
+    前四维人工编辑，后两维由复盘写回（也可手改）；"不写的主题"是唯一会
+    真正拦截选题的字段——定位/风格只是提示词，管不住抓取，必须单独硬过滤。
   - 缺字段一律用 config 里的旧常量兜底 —— 老项目首次运行行为与现在完全一致，
     不会因为多了这个文件就改变已验证过的生成质量。
   - 历史偏好只影响「标题取向 / 选题取舍」，明确要求模型不要写进正文，
@@ -19,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +37,16 @@ DIMENSIONS: list[dict[str, str]] = [
     {"key": "redlines", "label": "内容红线", "hint": "绝对不写的东西（诱导词、编造、敏感话题等）"},
     {"key": "title_preference", "label": "标题偏好", "hint": "哪类标题效果好——可由复盘一键写回"},
     {"key": "source_preference", "label": "选题源偏好", "hint": "哪个来源的选题效果好——可由复盘写回"},
+    {"key": "excluded_topics", "label": "不写的主题", "hint": "命中即丢弃的选题词，用逗号分隔；留空表示不过滤（如：汽车、房地产、明星八卦）"},
 ]
 EDITABLE_KEYS = [d["key"] for d in DIMENSIONS]
+
+
+def excluded_words() -> list[str]:
+    """把「不写的主题」切成词表；兼容逗号/顿号/分号/换行分隔。"""
+    raw = load().get("excluded_topics", "")
+    parts = re.split(r"[,，、;；\n]+", raw) if raw else []
+    return [p.strip() for p in parts if p.strip()]
 
 
 def defaults() -> dict[str, Any]:
@@ -54,6 +64,10 @@ def defaults() -> dict[str, Any]:
         ),
         "title_preference": "",
         "source_preference": "",
+        # 默认挡掉汽车整车类——账号定位是 AI/数码，这类稿不该再混进来
+        "excluded_topics": ", ".join(
+            getattr(config, "EXCLUDE_TOPIC_KEYWORDS", [])
+        ),
         "updated_at": "",
         "synced_at": "",
     }
@@ -72,6 +86,10 @@ def load() -> dict[str, Any]:
         return base
     for key in EDITABLE_KEYS:
         value = data.get(key)
+        # "不写的主题"允许留空（表示不过滤），其余字段空值仍回退默认
+        if key == "excluded_topics" and isinstance(value, str):
+            base[key] = value.strip()
+            continue
         if isinstance(value, str) and value.strip():
             base[key] = value
     base["updated_at"] = data.get("updated_at", "")
@@ -164,6 +182,11 @@ def prompt_block(mode: str = "article") -> str:
         f"写作风格：{p['style']}",
         f"内容红线：{p['redlines']}",
     ]
+    if p.get("excluded_topics"):
+        lines.append(
+            f"不写的主题：{p['excluded_topics']}"
+            "（这类素材直接跳过，不要扩写、也不要在正文里当背景提）"
+        )
     exp = []
     if p.get("title_preference"):
         exp.append(f"标题经验：{p['title_preference']}")
