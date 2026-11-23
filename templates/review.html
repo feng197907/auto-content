@@ -48,6 +48,9 @@
     .toolrow .lbl { font-size:13px; color:var(--muted); min-width:52px; }
     select { padding:9px 10px; border:1px solid var(--line); border-radius:8px;
              font-size:16px; background:#fff; min-height:42px; }
+    /* 生成篇数：可手动填写，比固定下拉灵活（宽度给够，别被挤成数字一点点） */
+    input.gen-count { width:84px; padding:9px 10px; border:1px solid var(--line);
+             border-radius:8px; font-size:16px; background:#fff; min-height:42px; }
 
     button { padding:9px 14px; border:1px solid var(--line); border-radius:8px;
              background:#fff; cursor:pointer; font-size:14px; min-height:42px;
@@ -377,12 +380,15 @@
     <div class="tools-body">
       <div class="toolrow">
         <span class="lbl">立即写</span>
-        <select id="genCount">
-          <option value="3">3 篇</option>
-          <option value="5" {{ 'selected' if daily_total == 5 else '' }}>5 篇</option>
-          <option value="7" {{ 'selected' if daily_total == 7 else '' }}>7 篇 · 每日配额</option>
-          <option value="10" {{ 'selected' if daily_total not in [5,7] else '' }}>10 篇</option>
+        <select id="genColumn" title="选择要生成的类目">
+          <option value="all">全部类目（混合）</option>
+          <option value="github">GitHub精选</option>
+          <option value="ai_news">AI早报</option>
+          <option value="ai_sidebiz">AI副业</option>
         </select>
+        <input type="number" id="genCount" class="gen-count" min="1" max="20"
+               value="{{ daily_total or 7 }}" title="篇数，1-20" aria-label="生成篇数">
+        <span class="sub">篇</span>
         <button class="primary wide" id="genBtn" onclick="generate()">生成</button>
       </div>
       <div class="toolrow">
@@ -694,12 +700,16 @@ async function pollGenerate(btn) {
 }
 async function generate() {
   const btn = document.getElementById('genBtn');
+  const colSel = document.getElementById('genColumn');
+  const column = colSel.value;
+  const colLabel = colSel.options[colSel.selectedIndex].text;
   const count = parseInt(document.getElementById('genCount').value, 10);
+  if (!count || count < 1 || count > 20) { toast('篇数请填 1-20 之间的数字'); return; }
   if (genPolling) { toast('已有生成任务在进行中'); return; }
   btn.disabled = true; btn.textContent = '生成中...';
-  toast('服务器已开始写稿，完成后自动刷新（可离开页面）');
+  toast('服务器已开始写「' + colLabel + '」' + count + ' 篇，完成后自动刷新（可离开页面）');
   try {
-    const r = await api('/generate', {count: count});
+    const r = await api('/generate', {count: count, column: column});
     if (r.ok && r.started) {
       genPolling = true;
       setTimeout(function () { pollGenerate(btn); }, 1500);

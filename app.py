@@ -62,6 +62,7 @@ generate_state: dict[str, Any] = {
     "error": "",
     "stage": "",       # 当前阶段（抓取选题 / 正在写第 N 篇 / 收尾），让用户看到活着
     "started_at": "",  # ISO 时间，前端算已用时
+    "column": "all",   # 本次生成的目标栏目，前端可显示
 }
 
 
@@ -216,7 +217,18 @@ def index() -> str:
     )
 
 
-def _generate_worker(count: int, demo: bool) -> None:
+def _column_quotas(column: str, count: int) -> dict[str, int] | None:
+    """把网页选的栏目转成流水线配额。
+
+    - all：返回 None，走旧混合抓稿逻辑（网页手动生成的默认行为）。
+    - 某个栏目：返回 {栏目: count}，只抓这一类，生成 count 篇。
+    """
+    if column == "all" or not column:
+        return None
+    return {column: count}
+
+
+def _generate_worker(count: int, demo: bool, column: str = "all") -> None:
     """后台线程：跑生成流水线，把进度/结果写回 generate_state。
 
     持锁贯穿整个生成过程（前端再点会收到 409），结束才释放。
@@ -231,7 +243,7 @@ def _generate_worker(count: int, demo: bool) -> None:
 
     generate_state.update({
         "running": True, "done": 0, "total": count,
-        "created": 0, "demo": demo, "error": "",
+        "created": 0, "demo": demo, "error": "", "column": column,
         "stage": "正在启动", "started_at": datetime.now().isoformat(timespec="seconds"),
     })
 
@@ -242,7 +254,8 @@ def _generate_worker(count: int, demo: bool) -> None:
         print(f"[generate] {stage}（{done}/{total}）", flush=True)
 
     try:
-        created = run_pipeline(count, demo, progress=on_progress)
+        quotas = _column_quotas(column, count)
+        created = run_pipeline(count, demo, progress=on_progress, quotas=quotas)
         generate_state["created"] = len(created)
         generate_state["stage"] = "已完成"
     except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务打挂
@@ -268,6 +281,15 @@ def generate() -> Any:
     count = int(data.get("count", config.BATCH_SIZE))
     count = max(1, min(count, 20))  # 限制 1-20，防止误操作刷爆
 
+    # 栏目筛选：只接受 all 或已定义的栏目键，非法值直接拒绝而不是静默全量生成
+    column = str(data.get("column", "all") or "all").strip()
+    allowed_columns = {"all", *config.COLUMN_LABELS.keys()}
+    if column not in allowed_columns:
+        return jsonify({
+            "ok": False,
+            "error": f"未知栏目：{column}",
+        }), 400
+
     # 没填 API key 就自动走 demo，保证网页端永远能跑
     demo = not bool(config.AI_API_KEY)
 
@@ -279,9 +301,12 @@ def generate() -> Any:
         }), 409
 
     threading.Thread(
-        target=_generate_worker, args=(count, demo), daemon=True
+        target=_generate_worker, args=(count, demo, column), daemon=True
     ).start()
-    return jsonify({"ok": True, "started": True, "total": count, "demo": demo})
+    return jsonify({
+        "ok": True, "started": True, "total": count,
+        "demo": demo, "column": column,
+    })
 
 
 @app.route("/generate/status")

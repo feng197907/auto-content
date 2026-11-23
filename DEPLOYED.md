@@ -1027,3 +1027,29 @@ crontab -l
   已生成的 OpenClaw 那篇要重新生成才会换成增长型项目。
 - **注意**：Trending 页偶发慢/超时（实测 20-25s），已设超时并静默降级；
   服务器网络若更慢，主要靠兜底源工作，同样能选出近期新锐项目。
+
+---
+
+## 四十四、生成工具区：栏目筛选 + 篇数手动填写（2026-11-23）
+
+- **需求**：用户在"生成 / 推送工具"区加类目筛选，篇数可手动填写，选好后点生成只出对应类目的文章。
+- **前端**（review.html）：
+  - 生成行改为「栏目下拉 + 篇数数字框 + 生成按钮」：下拉四项
+    `全部类目（混合）/ GitHub精选 / AI早报 / AI副业`；篇数由固定下拉改为
+    `input[type=number]`（min=1 max=20，默认每日配额），可手动填任意数。
+  - `generate()` 读 column + count，校验 1-20，提交 `/generate {count, column}`，
+    提交前 toast 里带上栏目名，让用户确认没选错。
+- **后端**（app.py）：
+  - `_column_quotas(column, count)`：`all`→None（走旧混合抓稿），具体栏目→`{栏目: count}`
+    （走 fetch_scheduled_items 只抓这一类）。
+  - `_generate_worker(count, demo, column)` 接收栏目、写进 generate_state 供前端显示，
+    构造 quotas 传给 `run_pipeline(..., quotas=quotas)`。
+  - `/generate` 读 column 并校验（只接受 `all` 或 COLUMN_LABELS 的 key），非法值返回
+    400 且不占生成锁；返回体带上 column。
+- **注意**：手动选 GitHub 栏目生成不受"每 3 天一次"约束——3 天节奏是 daily_job 自动排期
+  用 build_daily_quotas 控制的，手动配额直接抓，用户明确点了就出。
+- **验证**：配额映射 5 项 PASS；接口测试 PASS（栏目传入 worker / 篇数 clamp 20 /
+  非法栏目 400 且不占锁）；demo 端到端 PASS（ai_sidebiz 3 篇全落该类、ai_news 3 篇全落
+  该类、github 2 篇全落该类且是近期新锐项目）；前端渲染 5 项 PASS。
+  队列与 column_state 每次测试前后备份恢复，无临时测试文件。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`，刷新审核页即可看到新控件。
