@@ -1202,6 +1202,9 @@ def content_advice(body: str, desc: str = "") -> list[str]:
       3. 素材里有数字但正文一个都没用上——大概率在复述空话。
     """
     advice: list[str] = []
+    # desc 可能来自热榜某源，字段缺失时为 None；re.findall 收到 None 会抛
+    # TypeError，直接让 /generate 变 500。这里统一兜底成空串。
+    desc = desc or ""
     plain = re.sub(r"<[^>]+>", "", body)
     sections = re.split(r"<h2>.*?</h2>", body, flags=re.S)[1:]
 
