@@ -1053,3 +1053,23 @@ crontab -l
   该类、github 2 篇全落该类且是近期新锐项目）；前端渲染 5 项 PASS。
   队列与 column_state 每次测试前后备份恢复，无临时测试文件。
 - **服务器生效**：`git pull` + `systemctl restart auto-content`，刷新审核页即可看到新控件。
+
+---
+
+## 四十五、新稿红点提醒：生成后待审核亮红点，点预览清除（2026-11-23）
+
+- **需求**：GitHub 精选不是每天生成，容易被错过。希望生成新文章后待审核列表有红点提醒，
+  点「预览成品」看过之后红点消失。
+- **实现**（文章级未读标记）：
+  1. `pipeline.make_article` 新稿加 `unread=True`；老稿无该字段，view 层默认视为已读，不冒红点。
+  2. `app.py` index 统计 `status=pending 且 unread` 的篇数传给模板 `unread_count`
+     （已通过的不算，避免红点数字对不上待审核列表）；新增 `POST /mark-read/<id>` 清该稿
+     unread 并返回剩余待审核未读数。
+  3. `review.html`：待审核 tab 显示红色数字徽标（`unreadBadge`，0 时隐藏）；未读稿卡片加
+     "新"红标（`data-new-for`）；`preview()` 打开预览后调 `markRead(id)` → POST /mark-read →
+     即时移除该卡"新"标、更新 tab 数字（不 reload 页面），清失败也不影响预览。
+- **验证**：新稿带 unread PASS；混合队列页面红点=2（仅待审核、已通过不算）PASS；
+  mark-read 清一篇剩1、全清=0 PASS；前端渲染与路由注册全 PASS。队列测试前后备份恢复。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。新逻辑只对新生成的稿生效，
+  队列里已有老稿不会冒红点（符合预期）；想让某篇老稿重新提醒，可手动在 queue.json 给它加
+  `"unread": true`。

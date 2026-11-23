@@ -184,6 +184,13 @@ def index() -> str:
 
     counts = compute_stats(load_queue())
 
+    # 未读红点统计：只数待审核且带 unread 标记的稿（老稿无该字段视为已读）。
+    # 用户在待审核 tab 看到红点，点「预览成品」后由 /mark-read 清掉。
+    unread_count = sum(
+        1 for a in load_queue()
+        if a.get("status") == "pending" and a.get("unread")
+    )
+
     # 排版校验：把「粘到公众号会不会掉格式」提前算出来，显示在卡片上。
     # 查两层——转换产物（防转换器出 bug）+ 原始正文（防外部样式被静默丢弃）。
     # 只加在渲染用的副本里，不回写队列，避免数据污染。
@@ -204,6 +211,7 @@ def index() -> str:
         articles=articles,
         counts=counts,
         daily_total=config.BATCH_SIZE,
+        unread_count=unread_count,
         current=status,
         column=column,
         column_labels=config.COLUMN_LABELS,
@@ -668,6 +676,23 @@ def preview(article_id: str) -> Any:
         author=config.SITE_AUTHOR,
         title_advice=wechat.title_advice(article["title"], platform),
     )
+
+
+@app.route("/mark-read/<article_id>", methods=["POST"])
+def mark_read(article_id: str) -> Any:
+    """点「预览成品」后清除该稿的红点（unread 标记），返回剩余待审核未读数。"""
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"error": "稿件不存在"}), 404
+    if queue[index].get("unread"):
+        queue[index]["unread"] = False
+        save_queue(queue)
+    remaining = sum(
+        1 for a in queue
+        if a.get("status") == "pending" and a.get("unread")
+    )
+    return jsonify({"ok": True, "unread_count": remaining})
 
 
 if __name__ == "__main__":

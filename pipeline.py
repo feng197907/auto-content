@@ -1887,6 +1887,9 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         # 栏目标记：github / ai_sidebiz / ai_news，审核页三个筛选项靠它分类
         "column": classify_column(topic_item),
         "status": "pending",
+        # 未读标记：新生成的稿子带红点提醒，审核页点「预览成品」后清掉。
+        # 老稿没有这个字段，view 层默认视为已读，不冒红点。
+        "unread": True,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 

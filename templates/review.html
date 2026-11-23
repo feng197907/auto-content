@@ -69,6 +69,13 @@
               color:var(--muted); border:1px solid var(--line); border-radius:8px;
               font-size:14px; background:#fff; }
     .tabs a.on { background:var(--primary); color:#fff; border-color:var(--primary); font-weight:600; }
+    /* 待审核红点：有新稿时提醒，点预览看完清掉 */
+    .tabs a { position:relative; }
+    .dot-badge { display:inline-flex; align-items:center; justify-content:center;
+                 min-width:18px; height:18px; padding:0 5px; margin-left:6px;
+                 border-radius:999px; background:#e5484d; color:#fff;
+                 font-size:11px; font-weight:700; vertical-align:middle; }
+    .badge.new-dot { background:#e5484d; color:#fff; font-weight:700; }
     /* 栏目筛选：比状态 tab 小一号，胶囊样式，和主 tab 拉开层次 */
     .col-tabs { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 14px; }
     .col-tabs a { padding:5px 12px; text-decoration:none; font-size:12px; color:var(--muted);
@@ -402,7 +409,7 @@
   </details>
 
   <div class="tabs">
-    <a href="/?status=pending{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'pending' else '' }}">待审核</a>
+    <a href="/?status=pending{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'pending' else '' }}">待审核<span id="unreadBadge" class="dot-badge" {% if not unread_count %}style="display:none"{% endif %}>{{ unread_count }}</span></a>
     <a href="/?status=approved{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
     {# 「全部」tab 不参与栏目筛选，链接不带 column #}
     <a href="/?status=all" class="{{ 'on' if current == 'all' else '' }}">全部</a>
@@ -425,6 +432,7 @@
   {% for a in articles %}
   <div class="card" id="card-{{ a.id }}">
     <div class="meta">
+      {% if a.unread %}<span class="badge new-dot" data-new-for="{{ a.id }}">新</span>{% endif %}
       <span class="badge {{ 's-pending' if a.status == 'pending' else 's-approved' }}">
         {{ '待审核' if a.status == 'pending' else '已通过' }}
       </span>
@@ -1068,6 +1076,22 @@ async function preview(id) {
   const html = await res.text();
   document.getElementById('modalBody').innerHTML = html;
   document.getElementById('modal').classList.add('show');
+  // 看过即已读：清掉这篇的红点（含待审核 tab 的数字提醒），失败也不影响预览
+  markRead(id);
+}
+async function markRead(id) {
+  try {
+    const r = await api('/mark-read/' + id, {});
+    if (!r.ok) return;
+    const badge = document.querySelector('[data-new-for="' + id + '"]');
+    if (badge) badge.remove();
+    const dot = document.getElementById('unreadBadge');
+    if (dot) {
+      const n = parseInt(r.unread_count || 0, 10);
+      if (n > 0) { dot.textContent = n; dot.style.display = ''; }
+      else { dot.style.display = 'none'; }
+    }
+  } catch (e) { /* 清红点失败不影响主流程 */ }
 }
 function closeModal() { document.getElementById('modal').classList.remove('show'); }
 document.getElementById('modal').addEventListener('click', function (e) {
