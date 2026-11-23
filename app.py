@@ -47,6 +47,19 @@ app.secret_key = config.SECRET_KEY
 # 生成任务加锁，避免网页端重复点击导致队列写冲突
 generate_lock = threading.Lock()
 
+# 异步生成状态：网页点「生成」立即返回，后台线程慢慢写，前端轮询这个字典。
+# 之所以要异步：一次生成多篇 AI 稿要几分钟，nginx 默认 60s 代理超时会掐断请求，
+# 浏览器收到 504 就以为失败，但服务端其实还在写——用户重复点又会撞锁。
+# 用进程内字典存状态足够（单进程 Flask + 单实例部署），服务重启后状态归零无副作用。
+generate_state: dict[str, Any] = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "created": 0,
+    "demo": False,
+    "error": "",
+}
+
 
 def _password_ok() -> bool:
     """检查请求是否通过了密码验证。
@@ -186,9 +199,35 @@ def index() -> str:
     )
 
 
+def _generate_worker(count: int, demo: bool) -> None:
+    """后台线程：跑生成流水线，把进度/结果写回 generate_state。
+
+    持锁贯穿整个生成过程（前端再点会收到 409），结束才释放。
+    异常也写回状态，前端轮询能看到具体错误，不再靠 504 猜。
+    """
+    generate_state.update({
+        "running": True, "done": 0, "total": count,
+        "created": 0, "demo": demo, "error": "",
+    })
+    try:
+        created = run_pipeline(count, demo)
+        generate_state["created"] = len(created)
+    except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务打挂
+        generate_state["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[generate] 线程异常: {exc}")
+    finally:
+        generate_state["done"] = generate_state["total"]
+        generate_state["running"] = False
+        generate_lock.release()
+
+
 @app.route("/generate", methods=["POST"])
 def generate() -> Any:
-    """网页端一键生成：按配置调用流水线，返回新增篇数。"""
+    """网页端一键生成：立即返回，后台线程慢慢写，前端轮询 /generate/status。
+
+    改成异步的原因：一次写多篇要几分钟，同步请求会被 nginx 60s 超时掐断成 504，
+    浏览器报错但服务端还在写，用户重复点又撞锁。异步后请求秒回，彻底绕开网关超时。
+    """
     data = request.get_json(silent=True) or {}
     count = int(data.get("count", config.BATCH_SIZE))
     count = max(1, min(count, 20))  # 限制 1-20，防止误操作刷爆
@@ -197,17 +236,22 @@ def generate() -> Any:
     demo = not bool(config.AI_API_KEY)
 
     if not generate_lock.acquire(blocking=False):
-        return jsonify({"ok": False, "error": "正在生成中，请稍候"}), 409
-
-    try:
-        created = run_pipeline(count, demo)
         return jsonify({
-            "ok": True,
-            "created": len(created),
-            "demo": demo,
-        })
-    finally:
-        generate_lock.release()
+            "ok": False,
+            "error": "正在生成中，请稍候",
+            "state": dict(generate_state),
+        }), 409
+
+    threading.Thread(
+        target=_generate_worker, args=(count, demo), daemon=True
+    ).start()
+    return jsonify({"ok": True, "started": True, "total": count, "demo": demo})
+
+
+@app.route("/generate/status")
+def generate_status() -> Any:
+    """前端轮询：返回生成进度。页面刷新后也能重新读到当前状态。"""
+    return jsonify(dict(generate_state))
 
 
 @app.route("/optimize", methods=["POST"])

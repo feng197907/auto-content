@@ -750,3 +750,30 @@ crontab -l
 - 数据文件 `profile.json` / `analytics.json` / `holidays.json` 均被 `.gitignore` 的
   `data/*.json` 覆盖，不随 git 同步；换机需单独拷。
 - 服务器生效：`git pull` + `systemctl restart auto-content`。
+
+---
+
+## 三十四、生成按钮 504 Gateway Time-out → 改异步（2026-11-23）
+
+- **现象**：用户服务器（8080 nginx 反代 → 5001 Flask）点「生成」选 3 篇，浏览器报
+  `POST /generate 504 (Gateway Time-out)`；本地跑生成链路正常。
+- **根因**：不是代码崩溃，是 nginx 默认 `proxy_read_timeout 60s`。一次写 3 篇 AI 稿
+  要几分钟，网关 60 秒掐断连接 → 浏览器收到 504；但服务端线程其实还在写，
+  用户以为失败重复点又会撞 `generate_lock`。`deploy/nginx.conf` 原本也没有任何超时配置，
+  之前说的 `proxy_read_timeout 600s` 只写在文档里，服务器实际没生效。
+- **根治（本次改动）**：网页生成改为异步。
+  - `/generate` 提交后不起 pipeline，而是起后台线程，立即返回 `started:true`（秒回，绕开网关超时）。
+  - 新模块级 `generate_state` 记录 running/done/total/created/demo/error，线程里跑
+    `run_pipeline`，异常也写回状态；`generate_lock` 贯穿整个生成过程，结束才释放。
+  - 新增 `GET /generate/status` 供前端轮询；前端 `generate()` 提交后每 2.5s 查一次，
+    完成自动 reload，异常显示具体错误；页面刷新后若仍在生成会接管轮询。
+  - 沿用已有的 `_cover_worker` 后台线程模式，单进程 Flask 内存状态够用，重启归零无副作用。
+- **兜底**：`deploy/nginx.conf` 补 `proxy_read_timeout 600s` / `proxy_send_timeout 600s`
+  （optimize/retitle 仍同步调 AI，保留长超时）。**服务器实际配置要手动改**，见下。
+- **服务器生效（两步，缺一不可）**：
+  1. 代码：`cd /opt/auto-content && git pull && systemctl restart auto-content`。
+  2. nginx 超时：编辑 `/etc/nginx/conf.d/auto-content.conf`，在 `location / { }` 内加
+     `proxy_read_timeout 600s;` 和 `proxy_send_timeout 600s;`，然后
+     `nginx -t && systemctl reload nginx`。（生成已异步，这条主要是给 AI 重写/换标题兜底。）
+- 验证：mock 模拟耗时生成——提交 0.00s 秒回、后台生成 3 篇、状态轮询正确、锁释放后可再次
+  提交；异常路径写回 error 且释放锁；页面渲染含轮询脚本。临时测试未落盘。
