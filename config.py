@@ -601,10 +601,11 @@ WECHAT_SECRET = os.getenv("WECHAT_SECRET", "").strip()
 # ---- 头条号自动存草稿（可选，2026-11-23 新增）----
 # 原理：Playwright 持久化 profile 记住登录态，页面上下文调头条内部接口存草稿。
 # 头条无个人可用的官方发布 API，最后「发表」必须人进后台点，本系统只做存草稿。
-# 服务器前置：pip install playwright，再装一个 Chromium（二选一）：
+# 服务器前置：pip install playwright，再装一个能跑的 Chromium：
 #   - Debian/Ubuntu：playwright install chromium && playwright install-deps chromium
-#   - RHEL 系（Alibaba Cloud Linux / CentOS / Rocky）：dnf install -y chromium
-#     （playwright install-deps 只会找 apt-get，在 RHEL 系会失败，不要用它）
+#   - CentOS/Rocky：先试 dnf install -y chromium（装到就用系统包，自带全部依赖）
+#   - Alibaba Cloud Linux：官方源无 chromium 包，用 playwright install chromium，
+#     再按 DEPLOYED.md 第49节用 dnf 手动补运行库（install-deps 只找 apt-get，别用它）
 # 首次在审核页点「头条登录」扫码，登录态写进 data/toutiao_profile，之后免扫。
 # 浏览器可执行文件：默认自动探测系统 Chromium，探测不到再回退 Playwright 自带包。
 # 需要强制指定时在 .env 写绝对路径：BROWSER_EXECUTABLE_PATH=/usr/bin/chromium

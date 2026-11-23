@@ -1179,21 +1179,38 @@ crontab -l
   `playwright install-deps chromium` 报 `apt-get: command not found` / exit 127——
   Playwright 该命令只支持 Debian/Ubuntu，不支持 RHEL 系，它 fallback 到 ubuntu24.04
   的脚本去找 apt-get，必然失败。
-- **正解**：不要跑 `install-deps`，用系统包管理器装 Chromium：
+- **第二个坑**：Alibaba Cloud Linux 4 的官方源**没有 `chromium` 包**，
+  `dnf install -y chromium` 会报 `No match for argument: chromium`。所以 CentOS/Rocky 上那招在这也不通。
+- **最终方案**：用 Playwright 自带的 Chromium 二进制，手动用 dnf 补系统库。
   ```bash
-  dnf install -y chromium
+  # 1) 确认自带浏览器已下载（没下载才执行 install）
+  ls ~/.cache/ms-playwright/ 2>/dev/null || playwright install chromium
+
+  # 2) 看它到底缺哪些 .so（关键诊断，把输出贴出来可精确补）
+  CHROME=$(find ~/.cache/ms-playwright -type f -name chrome | head -1)
+  ldd "$CHROME" | grep 'not found' || echo 'WITH_RUNTIME_OK'
+
+  # 3) 大概率缺的库一次性补齐（Alibaba Cloud Linux 4 / RHEL 9 包名）
+  dnf install -y alsa-lib atk at-spi2-atk cups-libs dbus-libs expat gtk3 libdrm libgbm \
+                 libxkbcommon libX11 libXcomposite libXcursor libXdamage libXext libXi \
+                 libXrandr libXScrnSaver libXtst nss nspr pango \
+                 xorg-x11-fonts-100dpi xorg-x11-fonts-75dpi xorg-x11-fonts-cyrillic \
+                 xorg-x11-fonts-misc xorg-x11-fonts-Type1 xorg-x11-utils liberation-fonts
+
+  # 4) 再验证一次；出现 BROWSER_OK 就成了
+  python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print('BROWSER_OK', b.version); b.close(); p.stop()"
   ```
-  系统 chromium 包会把全部运行库一起带上，无需再补依赖。
+  任何一步报 `No match for argument: xxx`，把这个包名告诉我，我给你精简后的清单。
 - **配套代码改动**（本次）：`config.py` 新增 `BROWSER_EXECUTABLE_PATH`，留空时自动探测
   `/usr/bin/chromium`、`/usr/bin/chromium-browser`、`/usr/bin/google-chrome`，探测到就传给
   `launch_persistent_context(executable_path=...)`；头条与百家号两个模块共用。
   探测不到仍回退 Playwright 自带包（本地 Windows 开发不受影响）。装在非标准路径时在 `.env`
   写 `BROWSER_EXECUTABLE_PATH=/绝对路径/chromium` 强制指定。
-- **服务器完整步骤**（在报错的那台机器上）：
+- **服务器完整步骤**（在报错的那台机器上）：先按上面的「最终方案」跑通第 4 步的
+  `BROWSER_OK`，再执行：
   ```bash
-  dnf install -y chromium
   cd /opt/auto-content && git pull && systemctl restart auto-content
   ```
-  已执行过 `playwright install chromium` 也不用删，探测到系统 chromium 会优先用它。
+  探测不到系统 chromium 时代码会自动回退到 Playwright 自带包，所以第 4 步通过就够了。
   装完在审核页展开「头条号/百家号」面板，若显示已就绪即可扫码登录。
 - **验证**：8 项全 PASS（自动探测/留空回退/显式路径优先/两个平台 launch 传参/路由数不变）。

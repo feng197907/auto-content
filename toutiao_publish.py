@@ -152,9 +152,10 @@ class ToutiaoPublisher:
         """
         if not playwright_ready():
             raise ToutiaoError(
-                "服务器还没装 Playwright。先执行 pip install playwright，再装浏览器："
-                "RHEL 系执行 dnf install -y chromium；Debian/Ubuntu 执行 "
-                "playwright install chromium && playwright install-deps chromium"
+                "服务器还没装 Playwright 或浏览器。先 pip install playwright；"
+                "Debian/Ubuntu 再执行 playwright install chromium && playwright install-deps chromium；"
+                "CentOS/Rocky 先试 dnf install -y chromium；Alibaba Cloud Linux 官方源无 chromium，"
+                "用 playwright install chromium 后按 DEPLOYED.md 第49节补系统库"
             )
         if STATE_FILE.exists() and _load_state().get("logged_in"):
             return  # 已登录不必重复扫码
