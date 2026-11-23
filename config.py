@@ -465,6 +465,10 @@ USE_GITHUB_COLUMN = os.getenv("USE_GITHUB_COLUMN", "1") == "1"
 DAILY_GITHUB_COLUMN = max(0, int(os.getenv("DAILY_GITHUB_COLUMN", "1")))
 GITHUB_COLUMN_INTERVAL_DAYS = max(1, int(os.getenv("GITHUB_COLUMN_INTERVAL_DAYS", "3")))
 COLUMN_STATE_FILE = "data/column_state.json"
+# 选项目看"近期涨得快"：主源 Trending 周榜（本周新增星标），
+# 不足时兜底找"近 N 天新建且已过星标门槛"的项目（新建就涨到这个数=涨得快）。
+# 不再按历史累计总星排——那只会选出攒了几年的老项目。
+GITHUB_COLUMN_TREND_DAYS = max(7, int(os.getenv("GITHUB_COLUMN_TREND_DAYS", "30")))
 # 专栏最少 star 门槛：保证"星标较多"，低于此数不进候选
 GITHUB_COLUMN_MIN_STARS = max(100, int(os.getenv("GITHUB_COLUMN_MIN_STARS", "1000")))
 

@@ -47,6 +47,7 @@ def _github_column_fallback_card(item: dict[str, Any]) -> str:
     """专栏稿的降级卡：AI 不可用时，用真实字段拼一张项目速览，不编造。"""
     repo = item.get("repo") or item.get("title", "")
     stars = item.get("stars") or item.get("hot", 0)
+    stars_week = item.get("stars_week") or 0
     url = item.get("url", "").strip()
     desc = item.get("desc", "").strip()
     license_name = (item.get("license") or "").strip()
@@ -54,12 +55,18 @@ def _github_column_fallback_card(item: dict[str, Any]) -> str:
     readme = (item.get("readme") or "").strip()
 
     parts = ["<h2>一句话说清它是什么</h2>"]
+    growth = (
+        f"近一周新增 {stars_week:,} 星（增长很快）。"
+        if stars_week else ""
+    )
     parts.append(
         f"<p><strong>{repo}</strong> 是 GitHub 上的一个开源项目，"
-        f"当前 Star 数 {stars:,}。" + (f"{desc}" if desc else "官方简介暂缺。") + "</p>"
+        f"当前 Star 数 {stars:,}。{growth}" + (f"{desc}" if desc else "官方简介暂缺。") + "</p>"
     )
     parts.append("<h2>项目真实信息</h2>")
     meta = [f"仓库：{repo}"]
+    if stars_week:
+        meta.append(f"本周新增 Star：{stars_week:,}")
     if license_name and license_name.upper() != "NOASSERTION":
         meta.append(f"开源许可：{license_name}")
     if pushed:
@@ -642,6 +649,7 @@ def _build_github_column_prompt(item: dict[str, Any]) -> str:
     desc = item.get("desc", "").strip()
     url = item.get("url", "").strip()
     stars = item.get("stars") or item.get("hot", 0)
+    stars_week = item.get("stars_week") or 0
     forks = item.get("forks", 0)
     language = item.get("language", "").strip()
     license_name = item.get("license", "").strip()
@@ -654,8 +662,16 @@ def _build_github_column_prompt(item: dict[str, Any]) -> str:
         f"项目全名：{repo}",
         f"仓库地址：{url or '（素材未提供，不许自己拼）'}",
         f"Star 数：{stars:,}" if isinstance(stars, int) else f"Star 数：{stars}",
-        f"Fork 数：{forks:,}" if isinstance(forks, int) else f"Fork 数：{forks}",
     ]
+    if stars_week:
+        facts.append(
+            f"本周新增 Star：{stars_week:,}（这是选它的理由——近期增长快、热度高，"
+            f"写的时候要点出这个势头，但不要编造增长率百分比或对比其他项目）"
+            if isinstance(stars_week, int) else f"本周新增 Star：{stars_week}"
+        )
+    facts.append(
+        f"Fork 数：{forks:,}" if isinstance(forks, int) else f"Fork 数：{forks}"
+    )
     if language:
         facts.append(f"主要语言：{language}")
     if license_name and license_name.upper() != "NOASSERTION":
@@ -682,9 +698,17 @@ def _build_github_column_prompt(item: dict[str, Any]) -> str:
             "并明确告诉读者其余参数去仓库 README 核对。）"
         )
 
+    growth_angle = (
+        f"本期是「近期热度榜」——这个项目本周新增 {stars_week:,} 星，"
+        f"是因为近期涨得快才被选中，不是因为累计星标多。"
+        f"开头要点出这股增长势头，让读者知道它正被大量开发者关注；"
+        f"但只允许引用给出的新增数字，不许自己算百分比或跟别的项目比。\n\n"
+        if stars_week else ""
+    )
     return (
         "你是开源项目专栏作者，正在做一期只讲透一个项目的推荐。"
         "读者是想知道'这东西能不能用在我身上、怎么上手'的开发者。\n\n"
+        f"{growth_angle}"
         f"本期项目：{repo}\n"
         f"{material}\n\n"
         f"{profile_mod.prompt_block()}\n\n"

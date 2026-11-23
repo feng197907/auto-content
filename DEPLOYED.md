@@ -995,3 +995,35 @@ crontab -l
   `GITHUB_COLUMN_INTERVAL_DAYS`，不写用默认值。
 - **注意**：`data/column_state.json` 要能写（运行用户对 data/ 有写权限）；首次上线当天就会出一篇
   GitHub 专栏（无历史记录视为到期），之后按 3 天节奏。
+
+---
+
+## 四十三、GitHub 精选改为"近期涨得快"而非累计总星（2026-11-23）
+
+- **问题**：用户截图指出专栏选中的是 OpenClaw（累计 40 万星）这类攒了多年的老项目，
+  要的是"最近星标增长快、热度较高"的项目。
+- **根因**：`fetch_github(column=True)` 用 Search API `sort=stars` 按历史累计总星降序，
+  永远是老牌超级项目霸榜。
+- **改造**（双源增长优先，互为兜底）：
+  1. `hot_topics.fetch_github_trending()` 新函数：抓 GitHub 官方 Trending 周榜，
+     解析项目名 / `N stars this week`（本周新增星标）/ 累计星 / 语言 / 描述；
+     requests + re，不引依赖，失败静默返回空。注意页面是千分位写法（"2,815"），
+     `_to_hot` 不认逗号，解析前先去掉。
+  2. `fetch_github(column=True)` 委托给 `_fetch_github_column_growth()`：
+     - 主源 Trending 周榜，按本周新增星标降序（页面自带顺序并非严格按新增排序，自己重排）；
+     - 不足时用 Search API `created:>近30天 + stars:>门槛` 兜底，新建就涨到这个数=涨得快，
+       用累计星当增速代理；
+     - 两个源统一按 `stars_week` 降序，绝不按累计总星；
+     - trending 候选缺富素材，补一次 `repos/{repo}` 详情接口（license/topics/forks/推送时间）；
+       每个入选项目抓 README 用法片段当"怎么用"的真实依据。
+  3. `pipeline` 专栏提示词与降级卡注入"本周新增星标"事实，并要求开头点出增长势头，
+     但不许自算增长率百分比或跟别的项目比。
+  4. `config.GITHUB_COLUMN_TREND_DAYS=30` 控制兜底源"近多少天新建"，可 .env 覆盖。
+- **验证**：trending 解析（千分位/降序/富字段）PASS；真实网络端到端 18.4s 抓到 3 个
+  +6436/+4731/+3748 本周新增的项目，license/README 齐全；降级卡与提示词呈现增长 PASS。
+  另一次实测 trending 页 25s 超时，兜底源正常接管选中 30 天内新建的 2.4 万星项目——
+  双源兜底生效，不会退回老项目。队列测试前后备份恢复，无临时文件。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。新逻辑只在下次生成时生效，
+  已生成的 OpenClaw 那篇要重新生成才会换成增长型项目。
+- **注意**：Trending 页偶发慢/超时（实测 20-25s），已设超时并静默降级；
+  服务器网络若更慢，主要靠兜底源工作，同样能选出近期新锐项目。

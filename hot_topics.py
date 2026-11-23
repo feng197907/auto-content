@@ -44,6 +44,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 TOUTIAO_URL = "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
 BAIDU_URL = "https://top.baidu.com/board?tab=realtime"
 GITHUB_API = "https://api.github.com/search/repositories"
+GITHUB_TRENDING_URL = "https://github.com/trending"
 JUEJIN_HOT_API = "https://api.juejin.cn/content_api/v1/content/article_rank"
 WEIBO_URL = "https://weibo.com/ajax/side/hotSearch"
 DOUYIN_URL = "https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/"
@@ -447,6 +448,203 @@ def _github_readme_usage(repo: str, timeout: int = 8) -> str:
         return ""
 
 
+def fetch_github_trending(
+    limit: int = 10,
+    since: str = "weekly",
+    timeout: int = 25,
+) -> list[dict[str, Any]]:
+    """抓 GitHub 官方 Trending 榜——按"近期新增星标"排序的真正热度榜。
+
+    为什么不用 Search API 的 sort=stars：那是历史累计总星，挑出来的永远是
+    OpenClaw(40万) 这类攒了几年的老项目，不是"最近涨得快"的。Trending 页
+    自带"N stars this week"字段，正是用户要的近期热度。
+
+    页面是服务端渲染的 HTML，用 requests + re 解析，不引新依赖。
+    境外站偶发慢/不通（实测 20s 左右），失败静默返回空，由调用方兜底。
+    """
+    try:
+        response = requests.get(
+            GITHUB_TRENDING_URL,
+            params={"since": since},
+            headers=BROWSER_HEADERS,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        html = response.text
+    except (requests.RequestException, ValueError) as exc:
+        print(f"  GitHub Trending 抓取失败: {exc}")
+        return []
+
+    # 本周新增星标的字段名随 since 变化（today / this week / this month）
+    unit = {"daily": "today", "weekly": "this week", "monthly": "this month"}.get(since, "this week")
+    gain_re = re.compile(rf"([\d,]+)\s+stars?\s+{re.escape(unit)}", re.I)
+
+    result: list[dict[str, Any]] = []
+    for block in re.findall(r'<article class="Box-row">(.*?)</article>', html, re.S):
+        head = re.search(r"<h2[^>]*>(.*?)</h2>", block, re.S)
+        if not head:
+            continue
+        repo_match = re.search(r'href="/([^"]+)"', head.group(1))
+        if not repo_match:
+            continue
+        repo = repo_match.group(1).strip()
+        if "/" not in repo:
+            continue
+
+        gain_match = gain_re.search(block)
+        # Trending 页是千分位写法（"2,815"），_to_hot 只认纯数字，先去掉逗号
+        stars_week = _to_hot(gain_match.group(1).replace(",", "")) if gain_match else 0
+        total_match = re.search(
+            rf'href="/[^"]+/stargazers"[^>]*>(.*?)</a>', block, re.S
+        )
+        total_stars = (
+            _to_hot(re.sub(r"<[^>]+>", "", total_match.group(1)).strip().replace(",", ""))
+            if total_match else 0
+        )
+        desc_match = re.search(r"<p[^>]*>(.*?)</p>", block.split("</h2>", 1)[-1], re.S)
+        desc = ""
+        if desc_match:
+            desc = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", desc_match.group(1)))).strip()
+        lang_match = re.search(r'itemprop="programmingLanguage">([^<]+)', block)
+        language = lang_match.group(1).strip() if lang_match else ""
+
+        title = f"{repo}：{desc[:60]}" if desc else repo
+        result.append({
+            "title": title,
+            "desc": desc,
+            "url": f"https://github.com/{repo}",
+            "hot": stars_week or total_stars,
+            "source": "GitHub趋势榜",
+            "repo": repo,
+            "stars": total_stars,
+            "stars_week": stars_week,
+            "language": language,
+        })
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _github_repo_detail(repo: str, timeout: int = 8) -> dict[str, Any]:
+    """取单个仓库的富素材（许可/topics/forks/更新时间），失败返回空字典。"""
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{repo}",
+            headers={**HEADERS, "Accept": "application/vnd.github+json"},
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        license_info = data.get("license") or {}
+        return {
+            "forks": int(data.get("forks_count") or 0),
+            "language": (data.get("language") or "").strip(),
+            "license": (license_info.get("spdx_id") or "").strip(),
+            "pushed_at": (data.get("pushed_at") or "").strip(),
+            "topics": list(data.get("topics") or [])[:8],
+            "stars": int(data.get("stargazers_count") or 0),
+            "created_at": (data.get("created_at") or "").strip(),
+        }
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def _fetch_github_column_growth(
+    limit: int, min_stars: int, exclude_urls: set[str]
+) -> list[dict[str, Any]]:
+    """专栏专用：按"近期涨得最快"挑项目，双源互为兜底。
+
+    主源 Trending 周榜（本周新增星标是硬数据）；不够时用 Search API
+    找"近 30 天新建 + 已过 star 门槛"的项目（新建即涨得快，用累计星当增速代理）。
+    两个源都按增长速度排序，而不是历史总星。
+    """
+    floor = min_stars if min_stars > 0 else 1000
+    trend_days = getattr(config, "GITHUB_COLUMN_TREND_DAYS", 30)
+    candidates: list[dict[str, Any]] = []
+
+    # 1. 主源：Trending 周榜（按本周新增星标排序）
+    trending = fetch_github_trending(limit=max(limit * 3, 15))
+    for item in trending:
+        url = item["url"].rstrip("/")
+        if url in exclude_urls:
+            continue
+        # trending 的总星是页面抓的，够门槛才要（避免太冷门）
+        if item.get("stars", 0) < floor:
+            continue
+        candidates.append(item)
+
+    # 2. 兜底源：近 N 天新建且已过星标门槛（新建就涨到这个数 = 涨得快）
+    if len(candidates) < limit:
+        since = (date.today() - timedelta(days=trend_days)).isoformat()
+        try:
+            resp = requests.get(
+                GITHUB_API,
+                headers={**HEADERS, "Accept": "application/vnd.github+json"},
+                params={
+                    "q": f"AI in:name,description stars:>{floor} created:>{since}",
+                    "sort": "stars",
+                    "order": "desc",
+                    "per_page": min(max(limit * 3, 15), 30),
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            repos = resp.json().get("items", [])
+        except (requests.RequestException, ValueError) as exc:
+            print(f"  GitHub 新建热门抓取失败: {exc}")
+            repos = []
+        existing_urls = {c["url"].rstrip("/") for c in candidates}
+        for repo in repos:
+            name = (repo.get("full_name") or "").strip()
+            url = (repo.get("html_url") or "").strip()
+            if not name or not url or url.rstrip("/") in exclude_urls or url.rstrip("/") in existing_urls:
+                continue
+            stars = int(repo.get("stargazers_count") or 0)
+            desc = (repo.get("description") or "").strip()
+            candidates.append({
+                "title": f"{name}：{desc[:60]}" if desc else name,
+                "desc": desc,
+                "url": url,
+                "hot": stars,
+                "source": "GitHub新锐",
+                "repo": name,
+                "stars": stars,
+                "stars_week": stars,  # 新建项目的累计星即近期增量（近似）
+                "language": (repo.get("language") or "").strip(),
+                "license": ((repo.get("license") or {}).get("spdx_id") or "").strip(),
+                "forks": int(repo.get("forks_count") or 0),
+                "pushed_at": (repo.get("pushed_at") or "").strip(),
+                "topics": list(repo.get("topics") or [])[:8],
+                "created_at": (repo.get("created_at") or "").strip(),
+            })
+            existing_urls.add(url.rstrip("/"))
+
+    # 3. 统一按近期增速降序（Trending 页自带顺序并非严格按新增星标）
+    candidates.sort(key=lambda c: c.get("stars_week", 0), reverse=True)
+
+    # 4. 给入选项目补 README 用法片段（"怎么用"这一节的真实依据）
+    result: list[dict[str, Any]] = []
+    for item in candidates[:limit]:
+        row = dict(item)
+        row["column"] = "github"
+        row.setdefault("source", "GitHub趋势榜")
+        # trending 候选只有基础字段（无 license/forks/topics），补一次详情接口；
+        # 兜底源来自 Search API 已带全字段，跳过这次请求。
+        if row.get("source") == "GitHub趋势榜":
+            detail = _github_repo_detail(row["repo"])
+            for key in ("license", "forks", "pushed_at", "topics", "created_at"):
+                if detail.get(key) and not row.get(key):
+                    row[key] = detail[key]
+            if detail.get("stars"):
+                row["stars"] = detail["stars"]
+        usage = _github_readme_usage(row["repo"])
+        if usage:
+            row["readme"] = usage
+        result.append(row)
+    return result
+
+
 def fetch_github(
     limit: int = 5,
     days: int = 7,
@@ -454,18 +652,21 @@ def fetch_github(
     column: bool = False,
     exclude_urls: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """抓 GitHub 近 N 天活跃的 AI 相关热门仓库。
+    """抓 GitHub 热门仓库。
 
     两种用途：
     · 默认（column=False）：当热点线索，返回简版，给主资讯流兜底。
-    · 专栏（column=True）：挑 star 高、带 README/许可/更新时间的富素材，
-      供"一期讲透一个项目"的深度栏目基于事实写作。
+    · 专栏（column=True）：挑"近期涨得最快"的项目——主源用官方 Trending 周榜
+      （自带本周新增星标），不足时用"近 30 天新建且已过 star 门槛"的 Search API
+      兜底（新建即涨得快）。绝不按历史累计总星排，否则永远是攒了几年的老项目。
+      富素材带 README/许可/更新时间，供深度栏目基于事实写作。
 
-    用官方 Search API（无需 token，限流 10 次/分钟，每天跑一次足够）。
     失败静默返回空列表，不影响主流程。
     """
     since = (date.today() - timedelta(days=days)).isoformat()
     exclude_urls = exclude_urls or set()
+    if column:
+        return _fetch_github_column_growth(limit, min_stars, exclude_urls)
     try:
         # star 门槛：专栏默认用 config 的门槛（≥1000），普通兜底保持 100
         stars_floor = min_stars if min_stars > 0 else (100 if not column else 1000)
