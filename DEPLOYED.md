@@ -846,3 +846,30 @@ crontab -l
 - **验证**：编译通过；生成/改写两链路提示词均含三段规则 + 避坑标题式 + 自检四问；
   模拟 AI 跑真实链路首轮提示词确认注入；`data/queue.json` 前后均 1 篇未被污染。
 - **服务器生效**：`git pull` + `systemctl restart auto-content`。
+
+---
+
+## 三十八、生成进度可见：修复"点了生成一直没反应"的观感（2026-11-23）
+
+- **现象**：用户重新部署（第 34 节异步生成已生效）后点生成，`journalctl -u auto-content -f`
+  只看到前端每 2-3 秒一次 `GET /generate/status 200`，没有任何写稿日志，等 2 分钟以为卡死。
+- **判断**：实际后台线程在跑（前端持续轮询说明 `running=true`，否则前端会停），
+  但**完全不可观测**，两个原因：
+  1. `generate_state["done"]` 在整个 `run_pipeline` 期间恒为 0，只有全部跑完才一次性设成 total——
+     前端永远显示"生成中 0/3"，看着像死机。
+  2. Python 在 systemd 下 stdout 是**块缓冲**，`pipeline.py` 里的 `print`（选题、重写、AI 失败）
+     攒在缓冲区不刷到 journalctl——日志里只剩 Flask 访问日志。
+- **改动（只加可观测性，不改生成逻辑/超时）**：
+  1. `pipeline.run(count, demo, progress=None)` 加可选进度回调：抓取选题、每篇写完、保存队列
+     各上报一次 `progress(done, total, stage)`。不传则行为不变（`daily_job.py` 不受影响）。
+  2. `app._generate_worker`：`sys.stdout.reconfigure(line_buffering=True)` 让日志实时刷；
+     接回调把 `done`/`stage` 写进 `generate_state`；新增 `stage`（阶段文本）、`started_at`（开始时间）
+     两字段。异常时用 `traceback.print_exc()` 打完整堆栈，不再只一行。
+  3. 前端加 `genLabel(st)`：按钮显示"正在写第 2/3 篇 · 1分23秒"，刷新页面后接管轮询也显示阶段。
+- **为什么不动 AI_TIMEOUT=240**：那是为 1300-1700 字长稿设的，4.7 生成一篇常要 2 分钟，
+  降到 120 会白白丢稿。慢不是 bug，看不见才是。真慢就让它跑完，前端能看到进度即可。
+- **验证**：mock 模拟 3 篇慢生成——`done` 0→1→2→3 逐步上报、stage 阶段文本正确、
+  started_at 有值、完成后 running=false/created=3；真实链路回调 6 次（抓取→每篇→保存）；
+  `run()` 不传 progress 兼容（daily_job 路径）；前端 genLabel 渲染正确。队列未被测试污染。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。重启会杀掉当前那次卡住的旧线程——
+  它已跑很久且旧代码查不到进度，重启是合理的；重启后重新点生成即可看到实时进度。

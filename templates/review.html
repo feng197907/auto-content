@@ -592,7 +592,7 @@
           if (st.running) {
             genPolling = true;
             genBtn.disabled = true;
-            genBtn.textContent = '生成中 ' + (st.done || 0) + '/' + (st.total || '?');
+            genBtn.textContent = genLabel(st);
             pollGenerate(genBtn);
           }
         }).catch(function () {});
@@ -638,12 +638,22 @@ async function api(path, payload) {
 // 生成改成异步：提交秒回，后台线程写稿，这里轮询状态直到完成。
 // 这样一次写多篇也不会被 nginx 的 60s 代理超时掐成 504。
 let genPolling = false;
+// 按钮文字：显示当前阶段 + 已用时，让用户看到后台确实在动、没卡死。
+function genLabel(st) {
+  const stage = st.stage || ('生成中 ' + (st.done || 0) + '/' + (st.total || '?'));
+  let txt = stage;
+  if (st.started_at) {
+    const sec = Math.max(0, Math.floor((Date.now() - new Date(st.started_at).getTime()) / 1000));
+    txt += ' · ' + Math.floor(sec / 60) + '分' + String(sec % 60).padStart(2, '0') + '秒';
+  }
+  return txt;
+}
 async function pollGenerate(btn) {
   try {
     const res = await fetch(withPwd('/generate/status'));
     const st = await readJson(res);
     if (st.running) {
-      btn.textContent = '生成中 ' + (st.done || 0) + '/' + (st.total || '?');
+      btn.textContent = genLabel(st);
       setTimeout(function () { pollGenerate(btn); }, 2500);
       return;
     }

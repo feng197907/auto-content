@@ -1783,29 +1783,48 @@ def run_cleanup() -> int:
     return removed
 
 
-def run(count: int, demo: bool) -> list[dict[str, Any]]:
+def run(
+    count: int, demo: bool, progress: Any | None = None
+) -> list[dict[str, Any]]:
     """执行一次流水线，返回本次新增的稿件列表。
 
     app.py 的网页端一键生成也调用这个函数，因此需要返回结果。
+    progress(done, total, stage) 是可选进度回调：网页异步生成时用它实时
+    上报阶段，避免用户盯着 0/N 以为卡死。命令行/定时任务不传，行为不变。
     """
+    def report(done: int, stage: str) -> None:
+        if progress:
+            try:
+                progress(done, count, stage)
+            except Exception:  # noqa: BLE001 - 进度上报不能影响生成主流程
+                pass
+
     mode = "演示模式" if demo else "真实模式"
-    print(f"启动流水线（{mode}），本次生成 {count} 篇：")
+    print(f"启动流水线（{mode}），本次生成 {count} 篇：", flush=True)
+    report(0, "正在抓取选题")
 
     topic_items = fetch_topic_items(count)
     if not topic_items:
-        print("没有可用选题，退出。")
+        print("没有可用选题，退出。", flush=True)
+        report(0, "没有可用选题")
         return []
 
     queue = load_queue()
     created: list[dict[str, Any]] = []
-    for item in topic_items[:count]:
+    for idx, item in enumerate(topic_items[:count], start=1):
         hot_mark = f"（热度 {item['hot']:,}）" if item["hot"] else ""
-        print(f"  - 选题: {item['title']} [{item['source']}]{hot_mark}")
+        print(
+            f"  - [{idx}/{count}] 选题: {item['title']} [{item['source']}]{hot_mark}",
+            flush=True,
+        )
+        report(idx - 1, f"正在写第 {idx}/{count} 篇")
         article = make_article(item, demo)
         created.append(article)
         queue.insert(0, article)
+        report(idx, f"已写完第 {idx}/{count} 篇")
 
     # 生成完顺带清理过期稿件（新稿件时间为 now，不会被误删）
+    report(len(created), "正在保存队列")
     queue, removed = cleanup_queue(queue)
     save_queue(queue)
     print(

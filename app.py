@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 from collections import Counter
 from datetime import datetime
@@ -58,6 +59,8 @@ generate_state: dict[str, Any] = {
     "created": 0,
     "demo": False,
     "error": "",
+    "stage": "",       # 当前阶段（抓取选题 / 正在写第 N 篇 / 收尾），让用户看到活着
+    "started_at": "",  # ISO 时间，前端算已用时
 }
 
 
@@ -205,16 +208,35 @@ def _generate_worker(count: int, demo: bool) -> None:
     持锁贯穿整个生成过程（前端再点会收到 409），结束才释放。
     异常也写回状态，前端轮询能看到具体错误，不再靠 504 猜。
     """
+    # systemd 下 stdout 默认块缓冲，pipeline 的 print 会攒着不刷到 journalctl，
+    # 用户盯着日志只看到轮询访问、没有任何写稿进度，误以为卡死。改成行缓冲。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
     generate_state.update({
         "running": True, "done": 0, "total": count,
         "created": 0, "demo": demo, "error": "",
+        "stage": "正在启动", "started_at": datetime.now().isoformat(timespec="seconds"),
     })
+
+    def on_progress(done: int, total: int, stage: str) -> None:
+        generate_state["done"] = done
+        generate_state["total"] = total
+        generate_state["stage"] = stage
+        print(f"[generate] {stage}（{done}/{total}）", flush=True)
+
     try:
-        created = run_pipeline(count, demo)
+        created = run_pipeline(count, demo, progress=on_progress)
         generate_state["created"] = len(created)
+        generate_state["stage"] = "已完成"
     except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务打挂
         generate_state["error"] = f"{type(exc).__name__}: {exc}"
-        print(f"[generate] 线程异常: {exc}")
+        generate_state["stage"] = "出错了"
+        print(f"[generate] 线程异常: {exc}", flush=True)
+        import traceback
+        traceback.print_exc()
     finally:
         generate_state["done"] = generate_state["total"]
         generate_state["running"] = False
