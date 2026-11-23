@@ -1807,6 +1807,7 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
     source = topic_item.get("source", "领域词库")
     url = topic_item.get("url", "")
     desc = topic_item.get("desc", "")
+    column = classify_column(topic_item)
 
     if demo:
         title = topic
@@ -1885,11 +1886,12 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         "mode": mode,
         "body": body,
         # 栏目标记：github / ai_sidebiz / ai_news，审核页三个筛选项靠它分类
-        "column": classify_column(topic_item),
+        "column": column,
         "status": "pending",
-        # 未读标记：新生成的稿子带红点提醒，审核页点「预览成品」后清掉。
-        # 老稿没有这个字段，view 层默认视为已读，不冒红点。
-        "unread": True,
+        # 红点提醒只给 GitHub精选：其他栏目新稿不冒红点。
+        # 老稿没有这个字段，view 层默认视为已读，不冒红点；
+        # 点「预览成品」后由 /mark-read 清掉。
+        "unread": column == "github",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
 

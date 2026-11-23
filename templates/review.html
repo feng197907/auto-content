@@ -432,7 +432,7 @@
   {% for a in articles %}
   <div class="card" id="card-{{ a.id }}">
     <div class="meta">
-      {% if a.unread %}<span class="badge new-dot" data-new-for="{{ a.id }}">新</span>{% endif %}
+      {% if a.unread and a.column == 'github' and a.status == 'pending' %}<span class="badge new-dot" data-new-for="{{ a.id }}">新</span>{% endif %}
       <span class="badge {{ 's-pending' if a.status == 'pending' else 's-approved' }}">
         {{ '待审核' if a.status == 'pending' else '已通过' }}
       </span>

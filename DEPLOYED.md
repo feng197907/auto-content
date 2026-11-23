@@ -1073,3 +1073,22 @@ crontab -l
 - **服务器生效**：`git pull` + `systemctl restart auto-content`。新逻辑只对新生成的稿生效，
   队列里已有老稿不会冒红点（符合预期）；想让某篇老稿重新提醒，可手动在 queue.json 给它加
   `"unread": true`。
+
+---
+
+## 四十六、红点收窄：只有 GitHub精选新稿提醒（2026-11-23）
+
+- **需求**：三类新稿都冒红点太吵。只要 GitHub精选（每 3 天一次、最容易错过）新稿提醒，
+  AI早报 / AI副业的新稿不提醒。
+- **实现**（源头 + 展示层一起收紧，兼顾历史误标记）：
+  1. `pipeline.make_article`：提前算一次 `column = classify_column(topic_item)`，`unread`
+     改为 `column == "github"`——只有 GitHub精选新稿落 `unread=True`，另两类直接 False。
+  2. `app.py`：index 的 `unread_count` 与 `POST /mark-read` 的剩余数都追加
+     `a.get("column") == "github"` 条件，队列里历史误标记的其他栏目稿也不再计入红点。
+  3. `review.html`：卡片"新"标追加 `a.column == 'github' and a.status == 'pending'`，
+     与红点统计口径完全对齐（已通过稿、已读稿、非 GitHub 稿都不显示"新"标）。
+- **验证**：三栏目 make_article unread 字段 PASS；混合队列（含历史误标记）页面红点=1、
+  仅 github 待审核未读 PASS；卡片"新"标只出现在 github 新稿 PASS；mark-read 后剩 0 PASS。
+  共 10 项全 PASS。临时测试文件验收后已删除，未入库。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。存量队列无需清理——即使其他栏目
+  旧稿仍带 `unread: true`，页面也不会再为它们冒红点。

@@ -184,11 +184,14 @@ def index() -> str:
 
     counts = compute_stats(load_queue())
 
-    # 未读红点统计：只数待审核且带 unread 标记的稿（老稿无该字段视为已读）。
+    # 未读红点统计：只数 GitHub精选、待审核、带 unread 标记的稿。
+    # 其他栏目不冒红点；老稿无该字段视为已读。
     # 用户在待审核 tab 看到红点，点「预览成品」后由 /mark-read 清掉。
     unread_count = sum(
         1 for a in load_queue()
-        if a.get("status") == "pending" and a.get("unread")
+        if a.get("status") == "pending"
+        and a.get("unread")
+        and a.get("column") == "github"
     )
 
     # 排版校验：把「粘到公众号会不会掉格式」提前算出来，显示在卡片上。
@@ -690,7 +693,9 @@ def mark_read(article_id: str) -> Any:
         save_queue(queue)
     remaining = sum(
         1 for a in queue
-        if a.get("status") == "pending" and a.get("unread")
+        if a.get("status") == "pending"
+        and a.get("unread")
+        and a.get("column") == "github"
     )
     return jsonify({"ok": True, "unread_count": remaining})
 
