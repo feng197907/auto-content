@@ -297,6 +297,8 @@ KEYWORDS_WEAK = [
     "相机", "拍照", "性能", "应用", "平台", "开源", "代码",
     # 账号定位是"AI + 副业"，社交平台热榜里的副业类话题也算相关
     "副业", "搞钱", "兼职", "自由职业", "远程办公",
+    # 2026-11-23 补：副业变现方向，抓"AI副业 / 被动收入"主题
+    "AI副业", "被动收入",
 ]
 
 # 不写的主题（命中即丢弃，优先级高于上面的相关词）。
@@ -353,7 +355,9 @@ USE_BILIBILI_TOPICS = os.getenv("USE_BILIBILI_TOPICS", "1") == "1"  # B站热搜
 USE_WECHAT_SEARCH = os.getenv("USE_WECHAT_SEARCH", "1") == "1"
 WECHAT_SEARCH_KEYWORDS = [
     k.strip()
-    for k in os.getenv("WECHAT_SEARCH_KEYWORDS", "AI 副业,AI 工具").split(",")
+    # 注意：搜狗频控较严，fetch_wechat_search 只取前 3 个词（[:3]），
+    # 所以要新增词必须放在前三位。"AI副业"与"AI 副业"仅空格差异、不重复占坑。
+    for k in os.getenv("WECHAT_SEARCH_KEYWORDS", "AI 副业,AI 工具,被动收入").split(",")
     if k.strip()
 ]
 
