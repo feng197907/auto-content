@@ -75,6 +75,7 @@
     .badge { display:inline-block; padding:2px 8px; border-radius:5px; font-size:11px; white-space:nowrap; }
     .src-hot { background:#faece7; color:var(--warn); }
     .src-lib { background:#eef2f7; color:#475569; }
+    .col-github { background:#0f172a; color:#f8fafc; }  /* GitHub 专栏：深色徽标，和普通稿一眼区分 */
     .mode-ai { background:#e1f5ee; color:#0f766e; }
     .mode-fact { background:#e8f0fe; color:#1d4ed8; }
     /* 排版校验徽章：OK 绿、提醒黄、会掉格式红 */
@@ -402,6 +403,9 @@
       <span class="badge {{ 's-pending' if a.status == 'pending' else 's-approved' }}">
         {{ '待审核' if a.status == 'pending' else '已通过' }}
       </span>
+      {% if a.column == 'github' %}
+      <span class="badge col-github" title="GitHub 深度专栏：一期讲透一个高星标项目">GitHub精选</span>
+      {% endif %}
       <span class="badge {{ 'src-hot' if a.hot else 'src-lib' }}">
         {{ '热榜·' + a.source if a.hot else a.source }}
       </span>

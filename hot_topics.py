@@ -418,24 +418,67 @@ def fetch_wechat_search(limit: int = 12, timeout: int = 10) -> list[dict[str, An
     return result[:limit]
 
 
-def fetch_github(limit: int = 5, days: int = 7) -> list[dict[str, Any]]:
-    """抓 GitHub 近 N 天活跃的 AI 相关热门仓库，作为技术选题。
+def _github_readme_usage(repo: str, timeout: int = 8) -> str:
+    """抓仓库 README 里跟"安装/快速开始/用法"相关的片段，给专栏当真实素材。
+
+    GitHub 的 raw+json 媒体类型直接返回 README 纯文本，省掉 base64 解码。
+    失败就返回空串——专栏提示词会据此改说"以仓库 README 为准"，不硬编命令。
+    """
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/{repo}/readme",
+            headers={**HEADERS, "Accept": "application/vnd.github.raw+json"},
+            timeout=timeout,
+        )
+        if resp.status_code != 200 or not resp.text.strip():
+            return ""
+        lines = resp.text.splitlines()
+        keys = ("install", "quick start", "quickstart", "getting started",
+                "usage", "安装", "快速开始", "上手", "使用")
+        hit = -1
+        for i, line in enumerate(lines[:400]):
+            low = line.lower()
+            if low.strip().startswith("#") and any(k in low for k in keys):
+                hit = i
+                break
+        snippet = "\n".join(lines[hit:hit + 45] if hit >= 0 else lines[:45])
+        return _clean_text(snippet, 700)
+    except (requests.RequestException, ValueError):
+        return ""
+
+
+def fetch_github(
+    limit: int = 5,
+    days: int = 7,
+    min_stars: int = 0,
+    column: bool = False,
+    exclude_urls: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """抓 GitHub 近 N 天活跃的 AI 相关热门仓库。
+
+    两种用途：
+    · 默认（column=False）：当热点线索，返回简版，给主资讯流兜底。
+    · 专栏（column=True）：挑 star 高、带 README/许可/更新时间的富素材，
+      供"一期讲透一个项目"的深度栏目基于事实写作。
 
     用官方 Search API（无需 token，限流 10 次/分钟，每天跑一次足够）。
-    返回真实项目名、简介、仓库链接和 star 数，供 AI 基于事实写作。
     失败静默返回空列表，不影响主流程。
     """
     since = (date.today() - timedelta(days=days)).isoformat()
+    exclude_urls = exclude_urls or set()
     try:
+        # star 门槛：专栏默认用 config 的门槛（≥1000），普通兜底保持 100
+        stars_floor = min_stars if min_stars > 0 else (100 if not column else 1000)
         response = requests.get(
             GITHUB_API,
             headers={**HEADERS, "Accept": "application/vnd.github+json"},
             params={
-                # 近 N 天有更新、100+ star、名称或简介含 AI 的项目
-                "q": f"AI in:name,description stars:>100 pushed:>{since}",
+                # 近 N 天有更新、star 过门槛、名称或简介含 AI 的项目
+                "q": f"AI in:name,description stars:>{stars_floor} pushed:>{since}",
                 "sort": "stars",
                 "order": "desc",
-                "per_page": min(max(limit * 2, 5), 20),
+                # 专栏要多抓一些候选，好在排除已推荐过的项目后仍够选
+                "per_page": min(max(limit * 3, 10), 30),
             },
             timeout=10,
         )
@@ -446,20 +489,46 @@ def fetch_github(limit: int = 5, days: int = 7) -> list[dict[str, Any]]:
         return []
 
     result: list[dict[str, Any]] = []
-    for repo in repos[:limit]:
+    for repo in repos:
         name = (repo.get("full_name") or "").strip()
         if not name:
             continue
+        url = (repo.get("html_url") or "").strip()
+        # 专栏去重：这个仓库以前推荐过就跳过
+        if column and url and url.rstrip("/") in exclude_urls:
+            continue
+        stars = int(repo.get("stargazers_count") or 0)
         desc = (repo.get("description") or "").strip()
-        # 标题写成"仓库名：一句话简介"，让下游 AI 有明确话题可写
         title = f"{name}：{desc[:60]}" if desc else name
-        result.append({
+
+        item: dict[str, Any] = {
             "title": title,
             "desc": desc,
-            "url": repo.get("html_url", ""),
-            "hot": int(repo.get("stargazers_count") or 0),
-            "source": "GitHub热门",
-        })
+            "url": url,
+            "hot": stars,
+            "source": "GitHub精选" if column else "GitHub热门",
+        }
+        if column:
+            # 富素材：把专栏墙所需的客观信息都带上，AI 才有事实可写，
+            # 不用去编 star / 许可 / 更新时间。
+            license_info = repo.get("license") or {}
+            item.update({
+                "column": "github",
+                "repo": name,
+                "stars": stars,
+                "forks": int(repo.get("forks_count") or 0),
+                "language": (repo.get("language") or "").strip(),
+                "license": (license_info.get("spdx_id") or "").strip(),
+                "pushed_at": (repo.get("pushed_at") or "").strip(),
+                "topics": list(repo.get("topics") or [])[:8],
+            })
+            # README 用法片段是"怎么用"这一节的真实依据，多一次请求但值得
+            usage = _github_readme_usage(name)
+            if usage:
+                item["readme"] = usage
+        result.append(item)
+        if len(result) >= limit:
+            break
     return result
 
 

@@ -26,12 +26,53 @@ import profile as profile_mod
 ROOT = Path(__file__).resolve().parent
 QUEUE_PATH = ROOT / config.QUEUE_FILE
 
+def _github_column_fallback_card(item: dict[str, Any]) -> str:
+    """专栏稿的降级卡：AI 不可用时，用真实字段拼一张项目速览，不编造。"""
+    repo = item.get("repo") or item.get("title", "")
+    stars = item.get("stars") or item.get("hot", 0)
+    url = item.get("url", "").strip()
+    desc = item.get("desc", "").strip()
+    license_name = (item.get("license") or "").strip()
+    pushed = (item.get("pushed_at") or "").strip()
+    readme = (item.get("readme") or "").strip()
+
+    parts = ["<h2>一句话说清它是什么</h2>"]
+    parts.append(
+        f"<p><strong>{repo}</strong> 是 GitHub 上的一个开源项目，"
+        f"当前 Star 数 {stars:,}。" + (f"{desc}" if desc else "官方简介暂缺。") + "</p>"
+    )
+    parts.append("<h2>项目真实信息</h2>")
+    meta = [f"仓库：{repo}"]
+    if license_name and license_name.upper() != "NOASSERTION":
+        meta.append(f"开源许可：{license_name}")
+    if pushed:
+        meta.append(f"最近推送：{pushed}")
+    if item.get("language"):
+        meta.append(f"主要语言：{item['language']}")
+    parts.append("<p>" + " · ".join(meta) + "</p>")
+    if url:
+        parts.append(f'<p>仓库地址：<a href="{url}">{url}</a></p>')
+    if readme:
+        parts.append("<h2>怎么用：看官方 README 原文片段</h2>")
+        parts.append(f"<p>下列内容摘自项目 README，未作改写：</p><p>{readme}</p>")
+    parts.append("<h2>说明</h2>")
+    parts.append(
+        "<p>本期是未经 AI 改写的原始素材卡，所有信息来自 GitHub 官方接口，"
+        "不含任何虚构内容。AI 服务恢复后将自动生成完整解读。</p>"
+    )
+    return "\n".join(parts)
+
+
 def build_factual_card(item: dict[str, Any]) -> str:
     """无 AI key 时，用真实抓取的数据拼一张"事实卡"，绝不编造正文。
 
     与旧版假套话的区别：这里每个字都来自真实热榜数据——
     标题、摘要、来源、原文链接全是真的，没有一段凭空写的"建议"。
     """
+    # 专栏稿降级：用真实 GitHub 字段拼一张"项目速览卡"，不冒资讯腔
+    if item.get("column") == "github":
+        return _github_column_fallback_card(item)
+
     parts = ["<h2>事件摘要</h2>"]
     desc = item.get("desc", "").strip()
     if desc:
@@ -208,6 +249,38 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
 
+    # 0. GitHub 深度专栏：每天固定占 DAILY_GITHUB_COLUMN 篇，放在队列最前面。
+    #    跟第 6 步"GitHub 当热点线索"是两回事，互不冲突（专栏走专用提示词）。
+    column_quota = (
+        min(getattr(config, "DAILY_GITHUB_COLUMN", 1), limit)
+        if getattr(config, "USE_GITHUB_COLUMN", False)
+        else 0
+    )
+    if column_quota > 0:
+        # 去重：已推荐过的仓库不再重复上（读队列里 column=github 的 url）
+        try:
+            recommended = {
+                str(a.get("url", "")).rstrip("/")
+                for a in load_queue()
+                if a.get("column") == "github" and a.get("url")
+            }
+        except Exception:  # noqa: BLE001 - 去重失败不该挡住生成
+            recommended = set()
+        column_items = hot_topics.fetch_github(
+            column_quota,
+            min_stars=getattr(config, "GITHUB_COLUMN_MIN_STARS", 1000),
+            column=True,
+            exclude_urls=recommended,
+        )
+        for candidate in column_items:
+            if len(items) >= column_quota:
+                break
+            key = (candidate.get("url") or candidate.get("title") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(candidate)
+
     def take(candidates: list[dict[str, Any]], quota: int) -> None:
         """按配额取候选，用 url（退回 title）去重，不超过总上限 limit。"""
         added = 0
@@ -361,6 +434,80 @@ def word_count(body: str) -> int:
     return len(re.sub(r"\s+", "", re.sub(r"<[^>]+>", "", body)))
 
 
+def _build_github_column_prompt(item: dict[str, Any]) -> str:
+    """GitHub 深度专栏专用提示词：一期讲透一个高星标项目。
+
+    素材全部来自 GitHub API 的真实字段，AI 只做组织和解释，不许编造
+    star 数、许可、更新时间、命令参数或项目能力。
+    """
+    repo = item.get("repo") or item.get("title", "")
+    desc = item.get("desc", "").strip()
+    url = item.get("url", "").strip()
+    stars = item.get("stars") or item.get("hot", 0)
+    forks = item.get("forks", 0)
+    language = item.get("language", "").strip()
+    license_name = item.get("license", "").strip()
+    pushed_at = item.get("pushed_at", "").strip()
+    topics = item.get("topics") or []
+    readme = item.get("readme", "").strip()
+
+    # 把客观事实列成清单，AI 照抄即可，不需要（也不允许）去记、去猜
+    facts = [
+        f"项目全名：{repo}",
+        f"仓库地址：{url or '（素材未提供，不许自己拼）'}",
+        f"Star 数：{stars:,}" if isinstance(stars, int) else f"Star 数：{stars}",
+        f"Fork 数：{forks:,}" if isinstance(forks, int) else f"Fork 数：{forks}",
+    ]
+    if language:
+        facts.append(f"主要语言：{language}")
+    if license_name and license_name.upper() != "NOASSERTION":
+        facts.append(f"开源许可：{license_name}")
+    else:
+        facts.append("开源许可：素材未明确标注，提醒读者去仓库 LICENSE 文件核对")
+    if pushed_at:
+        facts.append(f"最近推送时间：{pushed_at}（照实写日期，不要评价活不活跃）")
+    if topics:
+        facts.append("项目标签：" + "、".join(str(t) for t in topics))
+    if desc:
+        facts.append(f"官方简介：{desc}")
+
+    material = "【项目真实信息，以下每一项都来自抓取，必须照实用，一个字都不许改】\n" + "\n".join(facts)
+    if readme:
+        material += (
+            "\n\n【项目 README 里的安装/用法片段，原文摘录，命令参数只能从这个片段里取】\n"
+            f"{readme}"
+        )
+    else:
+        material += (
+            "\n\n（这次没抓到 README 用法片段。因此『怎么用』这一节不许编具体命令，"
+            "只允许写通用安装方式（如 pip install 项目名、git clone 仓库地址），"
+            "并明确告诉读者其余参数去仓库 README 核对。）"
+        )
+
+    return (
+        "你是开源项目专栏作者，正在做一期只讲透一个项目的推荐。"
+        "读者是想知道'这东西能不能用在我身上、怎么上手'的开发者。\n\n"
+        f"本期项目：{repo}\n"
+        f"{material}\n\n"
+        f"{profile_mod.prompt_block()}\n\n"
+        "真实性硬要求（违反即作废）：\n"
+        "1. Star 数、Fork 数、许可、最近推送时间、官方简介只能用上面给的值，不许改动、不许四舍五入编造；\n"
+        "2. 仓库地址必须是上面给的真实链接，不许自己拼、不许猜；\n"
+        "3. 项目能力只写官方简介/README 里有的，不确定的直说'素材未说明，建议看仓库 README'；\n"
+        "4. 命令参数只能取自 README 片段或通用安装方式，不许编版本号、参数名、API 路径；\n"
+        "5. 不许写'据说是''广受好评''社区活跃'这类没有依据的评价；\n"
+        "6. 不要在文末写「信息来源」「出处」或任何来源标注，排版时会统一去掉。\n\n"
+        f"{config.GITHUB_COLUMN_RULE}\n\n"
+        "输出格式（严格遵守，否则无法发布）：\n"
+        f"{config.TITLE_RULE}\n"
+        "2. 正文按专栏四节结构写，总字数 1200-1600 字，每节 300-400 字，靠真实信息写够，不靠形容词灌水；\n"
+        "3. 小标题用两个井号加一个空格开头，严格为：## 小标题文字\n"
+        "4. 需要强调的句子用**这样**加粗，每节最多一句；\n"
+        "5. 命令、配置用三个反引号单独包成代码块，一行一条命令；\n"
+        "6. 不要写导语说明、不要解释思路，直接输出标题和正文。"
+    )
+
+
 def build_prompt(item: dict[str, Any]) -> str:
     """基于真实素材拼提示词，并要求 AI 不得编造事实。
 
@@ -372,6 +519,10 @@ def build_prompt(item: dict[str, Any]) -> str:
     desc = item.get("desc", "").strip()
     source = item.get("source", "实时热榜")
     url = item.get("url", "").strip()
+
+    # GitHub 深度专栏：一期讲透一个项目，走专用提示词，不套资讯结构
+    if item.get("column") == "github":
+        return _build_github_column_prompt(item)
 
     grade = material_grade(desc)
     low, high = config.ARTICLE_WORDS[grade]
@@ -1441,7 +1592,11 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         mode = "真实素材卡"
     else:
         # 按素材厚度定字数门槛：厚素材要求长，只有标题的反而不能长（长了必注水）
-        min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
+        # 专栏稿素材是 GitHub 结构化信息，按专栏深度单独给门槛，不受简介长短影响
+        if topic_item.get("column") == "github":
+            min_words = 1100
+        else:
+            min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
         prompt = build_prompt(topic_item)
         raw = call_ai(prompt)
         if raw is None:
@@ -1507,6 +1662,8 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
         "desc": desc,
         "mode": mode,
         "body": body,
+        # 专栏标记：审核页打标签、下次生成按 url 去重都靠它
+        **({"column": topic_item["column"]} if topic_item.get("column") else {}),
         "status": "pending",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }

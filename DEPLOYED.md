@@ -901,3 +901,36 @@ crontab -l
   prompt 含 scene_hint；全部规则场景无一被误伤；副业稿命中新场景。
 - **服务器生效**：`git pull` + `systemctl restart auto-content`。
   **已生成的旧图不会自动变**——在那篇稿上点「换一张」即可用新链路重画。
+
+---
+
+## 四十、GitHub 深度专栏：每天固定 1 篇"一期讲透一个高星标项目"（2026-11-23）
+
+- **需求**：用户要做系列专题，每天从 GitHub 找 star 多、可用于技术/AI 开发的项目，
+  按"文字描述 + 怎么用"输出，接进自动写稿系统。选定口径：**每期 1 个深度项目、
+  每天固定占 1 篇**。
+- **与现有能力的区别**：项目里早有 `hot_topics.fetch_github`，但它是把项目当"热点线索"
+  塞进通用"AI 科技资讯"模板写一篇新闻稿。专栏是独立的固定栏目，格式统一、素材更厚，
+  两者共存互不干扰。
+- **改动清单**：
+  1. `config.py`：新增 `USE_GITHUB_COLUMN`（默认 1）、`DAILY_GITHUB_COLUMN`（默认 1）、
+     `GITHUB_COLUMN_MIN_STARS`（默认 1000）三个开关；新增 `GITHUB_COLUMN_RULE` 专用写法规则
+     （四节固定结构：是什么 / 能做什么 / 怎么用 / 谁适合用；真实性硬约束；
+     命令参数只能取自 README 或通用安装方式，不许编版本号/参数/API）。
+  2. `hot_topics.py`：`fetch_github` 增加 `column` 模式——star 门槛可配、多抓候选、
+     带 license/language/pushed_at/topics、并新增 `_github_readme_usage()` 抓 README 的
+     "安装/用法"片段作为"怎么用"的真实依据；支持 `exclude_urls` 去重。
+  3. `pipeline.py`：`fetch_topic_items` 开头固定预留专栏位（排在队列最前，
+     `items[:limit]` 截断不会挤掉它），按队列里已推荐过的 `column=github` 稿件 url 去重；
+     新增 `_build_github_column_prompt`，`build_prompt` 见到 `column=github` 走专用提示词；
+     `make_article` 把 `column` 写进稿件；专栏 min_words 固定 1100；
+     AI 失败时走 `_github_column_fallback_card` 专版降级卡（不冒资讯腔）。
+  4. `templates/review.html`：专栏稿加深色"GitHub精选"徽标，与普通稿一眼区分。
+- **验证（本地，未写正式队列）**：素材抓取拿到真实 star/license/700 字 README 片段；
+  提示词分支正确（注入专栏规则+真实事实、不套资讯模板）；去重生效；
+  `fetch_topic_items(5)` 第 1 篇固定是专栏、篇数=1；`column` 正确写入稿件；
+  降级卡结构正确无资讯腔；真实 AI 首调成功产出 1173 字四节专栏稿。队列已备份并恢复。
+- **服务器生效**：`git pull` + `systemctl restart auto-content`。若要改门槛/篇数，
+  在 `.env` 里加 `GITHUB_COLUMN_MIN_STARS` / `DAILY_GITHUB_COLUMN`，不写就用默认值。
+- **注意**：本次本地实测 glm-4.7-flash 会间歇限流，本地那把 DeepSeek key 是无效的（401），
+  导致第二次调用降级成事实卡——这是本地测试环境问题，服务器已配置有效 key，不受影响。
