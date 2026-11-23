@@ -113,13 +113,16 @@ class ToutiaoPublisher:
     def _launch(self, pw: Any) -> Any:
         """启动持久化 context。登录态存在 profile 目录，跨进程复用。"""
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        browser = pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=self.headless,
-            viewport={"width": 1280, "height": 900},
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        return browser
+        kwargs: dict[str, Any] = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": self.headless,
+            "viewport": {"width": 1280, "height": 900},
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        # RHEL 系用 dnf 装的系统 Chromium；探测到就显式指定，绕开自带包缺库的问题
+        if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
+            kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
+        return pw.chromium.launch_persistent_context(**kwargs)
 
     def check_login(self) -> bool:
         """打开 profile 检查登录态：能进创作后台即算已登录。"""
@@ -149,8 +152,9 @@ class ToutiaoPublisher:
         """
         if not playwright_ready():
             raise ToutiaoError(
-                "服务器还没装 Playwright。先在服务器执行 pip install playwright "
-                "和 playwright install-deps chromium / playwright install chromium"
+                "服务器还没装 Playwright。先执行 pip install playwright，再装浏览器："
+                "RHEL 系执行 dnf install -y chromium；Debian/Ubuntu 执行 "
+                "playwright install chromium && playwright install-deps chromium"
             )
         if STATE_FILE.exists() and _load_state().get("logged_in"):
             return  # 已登录不必重复扫码

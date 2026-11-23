@@ -116,12 +116,16 @@ class BaijiaPublisher:
 
     def _launch(self, pw: Any) -> Any:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        return pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=self.headless,
-            viewport={"width": 1440, "height": 960},
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        kwargs: dict[str, Any] = {
+            "user_data_dir": str(PROFILE_DIR),
+            "headless": self.headless,
+            "viewport": {"width": 1440, "height": 960},
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        # 与头条共用同一套浏览器探测：RHEL 系走 dnf 装的系统 Chromium
+        if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
+            kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
+        return pw.chromium.launch_persistent_context(**kwargs)
 
     def check_login(self) -> bool:
         if not playwright_ready():

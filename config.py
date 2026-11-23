@@ -601,7 +601,22 @@ WECHAT_SECRET = os.getenv("WECHAT_SECRET", "").strip()
 # ---- 头条号自动存草稿（可选，2026-11-23 新增）----
 # 原理：Playwright 持久化 profile 记住登录态，页面上下文调头条内部接口存草稿。
 # 头条无个人可用的官方发布 API，最后「发表」必须人进后台点，本系统只做存草稿。
-# 服务器前置：pip install playwright && playwright install chromium && playwright install-deps chromium
+# 服务器前置：pip install playwright，再装一个 Chromium（二选一）：
+#   - Debian/Ubuntu：playwright install chromium && playwright install-deps chromium
+#   - RHEL 系（Alibaba Cloud Linux / CentOS / Rocky）：dnf install -y chromium
+#     （playwright install-deps 只会找 apt-get，在 RHEL 系会失败，不要用它）
 # 首次在审核页点「头条登录」扫码，登录态写进 data/toutiao_profile，之后免扫。
+# 浏览器可执行文件：默认自动探测系统 Chromium，探测不到再回退 Playwright 自带包。
+# 需要强制指定时在 .env 写绝对路径：BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
+BROWSER_EXECUTABLE_PATH = os.getenv("BROWSER_EXECUTABLE_PATH", "").strip()
+if not BROWSER_EXECUTABLE_PATH:
+    for _chrome_path in (
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+    ):
+        if os.path.isfile(_chrome_path):
+            BROWSER_EXECUTABLE_PATH = _chrome_path
+            break
 TOUTIAO_HEADLESS = os.getenv("TOUTIAO_HEADLESS", "1") == "1"  # 服务器无头运行
 TOUTIAO_ENABLED = os.getenv("TOUTIAO_ENABLED", "1") == "1"    # 总开关，出问题可关掉入口

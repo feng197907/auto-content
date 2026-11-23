@@ -1172,3 +1172,28 @@ crontab -l
   - 百度 App 扫码登录是正常登录，不受风控滑块影响；存草稿是低频操作。
   - 无凭据外链图被渲染器丢弃（避免热链失败）；封面通过 file input 上传，失败不阻断存草稿。
   - 登录态存 `data/baijia_profile`，不随 git 同步，换机要重新扫码。
+
+## 49. 修复 RHEL 系服务器装不上 Chromium 依赖（2026-11-23）
+
+- **问题**：服务器是 Alibaba Cloud Linux 4（RHEL 系，用 `dnf`）。执行
+  `playwright install-deps chromium` 报 `apt-get: command not found` / exit 127——
+  Playwright 该命令只支持 Debian/Ubuntu，不支持 RHEL 系，它 fallback 到 ubuntu24.04
+  的脚本去找 apt-get，必然失败。
+- **正解**：不要跑 `install-deps`，用系统包管理器装 Chromium：
+  ```bash
+  dnf install -y chromium
+  ```
+  系统 chromium 包会把全部运行库一起带上，无需再补依赖。
+- **配套代码改动**（本次）：`config.py` 新增 `BROWSER_EXECUTABLE_PATH`，留空时自动探测
+  `/usr/bin/chromium`、`/usr/bin/chromium-browser`、`/usr/bin/google-chrome`，探测到就传给
+  `launch_persistent_context(executable_path=...)`；头条与百家号两个模块共用。
+  探测不到仍回退 Playwright 自带包（本地 Windows 开发不受影响）。装在非标准路径时在 `.env`
+  写 `BROWSER_EXECUTABLE_PATH=/绝对路径/chromium` 强制指定。
+- **服务器完整步骤**（在报错的那台机器上）：
+  ```bash
+  dnf install -y chromium
+  cd /opt/auto-content && git pull && systemctl restart auto-content
+  ```
+  已执行过 `playwright install chromium` 也不用删，探测到系统 chromium 会优先用它。
+  装完在审核页展开「头条号/百家号」面板，若显示已就绪即可扫码登录。
+- **验证**：8 项全 PASS（自动探测/留空回退/显式路径优先/两个平台 launch 传参/路由数不变）。
