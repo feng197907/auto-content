@@ -1092,6 +1092,66 @@ def structure_issues(
     return issues
 
 
+# ---- 去 AI 感质检：只诊断不改稿，供审核页显示"AI 味"评分 ----
+# 借鉴 Easel 的 zh-ai-markers 思路：中文 AI 稿有固定的腔调特征——
+# 公文腔套话、吊胃口开头、排比扎堆、结尾不落地、程度副词堆砌。
+# 这里只报症状不自动改，因为改范文会破坏加入的真实细节，交给人在审核页定夺。
+AI_TONE_MARKERS = (
+    ("公文腔", (
+        "值得注意的是", "不难发现", "众所周知", "由此可见", "总而言之",
+        "综上所述", "在当今社会", "随着……的发展", "扮演着重要的角色",
+        "具有重要意义", "发挥着重要作用", "起到了一定的作用",
+    )),
+    ("吊胃口", (
+        "接下来我们就", "下面为大家", "你猜怎么着", "答案即将揭晓",
+        "让我们拭目以待", "究竟是怎么回事", "背后真相令人",
+    )),
+    ("空泛升华", (
+        "展望未来", "前景可期", "值得期待", "共同努力", "共创美好",
+        "迈上新台阶", "书写新篇章", "交出满意答卷",
+    )),
+    ("程度堆砌", (
+        "极大地", "显著地", "大幅度地", "深刻地", "全方位地",
+        "有效地", "充分地", "实实在在地",
+    )),
+)
+
+
+def ai_tone_check(body: str) -> dict[str, Any]:
+    """检测正文的 AI 腔，返回评分与命中的症状（不改稿）。
+
+    评分：满分 100，每命中一类症状按出现次数扣分，封底 0。
+    只做字符串信号检测，误报率低；语义层面的"没营养"交给 content_advice。
+    """
+    plain = re.sub(r"<[^>]+>", "", body or "")
+    hits: list[dict[str, str]] = []
+    score = 100
+    for label, words in AI_TONE_MARKERS:
+        found = [w for w in words if w in plain]
+        if not found:
+            continue
+        count = sum(plain.count(w) for w in found)
+        hits.append({"label": label, "words": "、".join(found[:3]), "count": count})
+        score -= min(25, 8 + count * 4)
+
+    # 排比扎堆：同一句式"对……而言""不仅……而且"出现 3 次以上
+    for pat, label in ((r"对[^，。]{1,12}而言", "排比句式"), (r"不仅[^，。]{1,20}而且", "递进排比")):
+        n = len(re.findall(pat, plain))
+        if n >= 3:
+            hits.append({"label": label, "words": f"出现 {n} 次", "count": n})
+            score -= min(20, 6 + n * 3)
+
+    # 结尾是否落地：末段有具体动作/判断词算落地，全是升华算空
+    tail = plain.strip()[-160:]
+    action_words = ("检查", "确认", "试试", "先", "再", "应该", "可以", "建议", "步骤", "命令", "设置")
+    if tail and not any(w in tail for w in action_words):
+        hits.append({"label": "结尾不落地", "words": "末段没有可执行的动作或明确判断", "count": 1})
+        score -= 10
+
+    score = max(0, score)
+    return {"score": score, "level": "轻" if score >= 80 else ("中" if score >= 60 else "重"), "hits": hits}
+
+
 def body_to_text(body: str) -> str:
     """把成稿 HTML 还原成带 Markdown 标记的纯文本，供扩写提示词使用。"""
     text = re.sub(r"<h2>(.*?)</h2>", r"\n## \1\n", body, flags=re.S)

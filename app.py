@@ -24,6 +24,7 @@ from flask import (
 )
 
 import config
+import analytics
 import cover as cover_mod
 import wechat
 import publish as publish_mod
@@ -35,6 +36,7 @@ from pipeline import (
     optimize_article,
     regenerate_titles,
     apply_title,
+    ai_tone_check,
 )
 
 app = Flask(__name__)
@@ -157,6 +159,7 @@ def index() -> str:
         body = item.get("body", "")
         checks = wechat.validate_source(body) + wechat.validate_html(wechat.to_wechat_html(body))
         row["fmt"] = wechat.summarize_issues(checks)
+        row["tone"] = ai_tone_check(body)
         articles.append(row)
 
     return render_template(
@@ -166,6 +169,8 @@ def index() -> str:
         current=status,
         review_url=config.REVIEW_URL,
         publish_ready=publish_mod.configured(),
+        analytics=analytics.summarize(),
+        analytics_records=analytics.load_records(),
     )
 
 
@@ -269,6 +274,36 @@ def title_apply() -> Any:
     if updated is None:
         return jsonify({"ok": False, "error": "应用失败：稿件不存在或标题不合法"})
     return jsonify({"ok": True, "id": updated["id"], "title": updated["title"]})
+
+
+@app.route("/analytics/record", methods=["POST"])
+def analytics_record() -> Any:
+    """录入/更新一篇稿的发布后数据。按 article_id 去重，重复录入会覆盖。"""
+    data = request.get_json(silent=True) or {}
+    article_id = data.get("id", "")
+    if not article_id:
+        return jsonify({"ok": False, "error": "缺少稿件 id"}), 400
+
+    queue = load_queue()
+    article = next((a for a in queue if a.get("id") == article_id), None)
+    if article is None:
+        return jsonify({"ok": False, "error": "稿件不存在（可能已被清理）"}), 404
+
+    try:
+        record = analytics.upsert(article, data, formula=data.get("formula", ""))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "record": record})
+
+
+@app.route("/analytics/delete", methods=["POST"])
+def analytics_delete() -> Any:
+    """删除一条复盘记录。"""
+    data = request.get_json(silent=True) or {}
+    article_id = data.get("id", "")
+    if not article_id or not analytics.remove(article_id):
+        return jsonify({"ok": False, "error": "记录不存在"}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/notify", methods=["POST"])

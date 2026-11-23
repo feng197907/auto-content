@@ -188,6 +188,41 @@
       .modal-box { border-radius:12px; max-width:680px; max-height:86vh; }
       .modal-head, .modal-body { padding-left:24px; padding-right:24px; }
     }
+
+    /* ---- AI 味徽章 ---- */
+    .badge.tone-ok    { background:#ecfdf5; color:#0f6e56; border-color:#a7f3d0; }
+    .badge.tone-mid   { background:#fff7ed; color:#b45309; border-color:#fed7aa; }
+    .badge.tone-heavy { background:#fef2f2; color:#c0392b; border-color:#fecaca; }
+
+    /* ---- 数据复盘面板 ---- */
+    details.review-panel { background:var(--card); border:1px solid var(--line);
+                    border-radius:10px; margin-bottom:12px; }
+    details.review-panel > summary { padding:11px 14px; font-size:14px; font-weight:600;
+                    cursor:pointer; list-style:none; display:flex;
+                    align-items:center; justify-content:space-between; }
+    details.review-panel > summary::-webkit-details-marker { display:none; }
+    details.review-panel > summary::after { content:'▾'; color:var(--muted); font-size:12px; }
+    details.review-panel[open] > summary::after { content:'▴'; }
+    .rp-body { padding:0 14px 14px; }
+    .rp-empty { color:var(--muted); font-size:13px; padding:8px 0; }
+    .rp-group { margin-bottom:12px; }
+    .rp-group h4 { font-size:12px; color:var(--muted); margin:8px 0 6px; font-weight:600; }
+    .rp-row { display:flex; align-items:center; gap:8px; font-size:13px;
+              padding:5px 0; border-bottom:1px solid #f3f4f6; }
+    .rp-row .nm { flex:1; }
+    .rp-row .val { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .rp-row .bar { width:80px; height:6px; background:#f3f4f6; border-radius:3px; overflow:hidden; }
+    .rp-row .bar > i { display:block; height:100%; background:#1d9e75; }
+    .rp-insight { background:#eff6ff; border:1px solid #bfdbfe; border-radius:8px;
+                  padding:8px 10px; font-size:13px; color:#1e40af; margin-top:8px; }
+    .rp-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+    .rp-table th, .rp-table td { text-align:left; padding:5px 6px; border-bottom:1px solid #f3f4f6; }
+    .rp-table th { color:var(--muted); font-weight:600; }
+    .rec-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-top:12px; }
+    .rec-grid label, .modal-body > label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:4px; }
+    .rec-grid input, .rec-grid select, .modal-body > label input {
+      font-size:15px; padding:9px 10px; border:1px solid var(--line);
+      border-radius:8px; background:#fff; color:var(--ink); width:100%; }
   </style>
 </head>
 <body>
@@ -206,6 +241,40 @@
     <div class="stat"><div class="label">通过率</div><div class="num">{{ counts.rate }}%</div></div>
     <div class="stat"><div class="label">总稿件</div><div class="num">{{ counts.all }}</div></div>
   </div>
+
+  <details class="review-panel" id="analyticsBox">
+    <summary>数据复盘 · 已录 {{ analytics.total }} 篇</summary>
+    <div class="rp-body">
+      {% if analytics.total == 0 %}
+      <div class="rp-empty">还没录数据。在下面已发布的稿件上点「录数据」，把公众号后台的阅读/在看/转发填进来，攒几篇就能看出哪类标题有效。</div>
+      {% else %}
+      {% for ins in analytics.insights %}<div class="rp-insight">{{ ins }}</div>{% endfor %}
+      {% set maxeff = analytics.by_formula[0].avg_efficiency or 1 %}
+      <div class="rp-group">
+        <h4>按标题公式（互动效率 = 每千次阅读的互动数）</h4>
+        {% for g in analytics.by_formula %}
+        <div class="rp-row"><span class="nm">{{ g.name }}</span>
+          <span class="bar"><i style="width:{{ (g.avg_efficiency / maxeff * 100) | round | int }}%"></i></span>
+          <span class="val">{{ g.avg_efficiency }} · {{ g.count }} 篇</span></div>
+        {% endfor %}
+      </div>
+      <div class="rp-group">
+        <h4>按选题来源</h4>
+        {% for g in analytics.by_source %}
+        <div class="rp-row"><span class="nm">{{ g.name }}</span>
+          <span class="val">均阅读 {{ g.avg_views }} · 效率 {{ g.avg_efficiency }} · {{ g.count }} 篇</span></div>
+        {% endfor %}
+      </div>
+      <div class="rp-group">
+        <h4>按篇幅</h4>
+        {% for g in analytics.by_length %}
+        <div class="rp-row"><span class="nm">{{ g.name }}文</span>
+          <span class="val">均阅读 {{ g.avg_views }} · 效率 {{ g.avg_efficiency }} · {{ g.count }} 篇</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </details>
 
   <details class="tools" id="toolsBox">
     <summary>生成 / 推送工具</summary>
@@ -252,6 +321,13 @@
       <span class="badge {{ 'mode-ai' if a.mode and 'AI' in a.mode else 'mode-fact' }}">
         {{ a.mode | default('真实素材卡', true) }}
       </span>
+      {% set tone = a.tone %}
+      {% if tone and tone.hits %}
+      <span class="badge {{ 'tone-heavy' if tone.level == '重' else 'tone-mid' }}"
+            title="{{ tone.hits | map(attribute='label') | join('、') }}：{{ tone.hits | map(attribute='words') | join('；') }}">AI味 {{ tone.score }}分 · {{ tone.hits|length }}处</span>
+      {% else %}
+      <span class="badge tone-ok" title="没有检测到明显 AI 腔套话">AI味 轻</span>
+      {% endif %}
       {% set fmt = a.fmt %}
       {% if fmt and fmt.errors %}
       <span class="badge fmt-err" title="{{ fmt.issues | selectattr('level', 'equalto', 'error') | map(attribute='message') | join('｜') }}">排版 {{ fmt.errors }} 处会掉格式</span>
@@ -311,6 +387,7 @@
       </button>
       {% endif %}
       <button class="ghost" onclick="preview('{{ a.id }}')">预览成品</button>
+      <button class="ghost" onclick="openRecord('{{ a.id }}')">录数据</button>
       {% if a.status == 'approved' %}
       <button class="ghost" onclick="setStatus('{{ a.id }}','pending')">退回待审</button>
       {% endif %}
@@ -343,6 +420,40 @@
     <div class="modal-body">
       <div class="copy-tip" id="titleTip">AI 正在按 3 种不同思路拟标题，请稍候…</div>
       <div id="titleList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 发布后数据录入弹窗 -->
+<div class="modal" id="recordModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>录数据 · 发布后复盘</b>
+      <button onclick="closeRecordModal()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="copy-tip" id="recordTitle"></div>
+      <div class="rec-grid">
+        <label>阅读数<input type="number" id="recViews" min="0" placeholder="公众号后台阅读"></label>
+        <label>在看<input type="number" id="recLikes" min="0" placeholder="点赞在看"></label>
+        <label>转发<input type="number" id="recShares" min="0" placeholder="分享转发"></label>
+        <label>涨粉<input type="number" id="recFollowers" min="0" placeholder="本期新增关注"></label>
+        <label>发布日期<input type="date" id="recDate"></label>
+        <label>标题公式
+          <select id="recFormula">
+            <option value="">自动判断</option>
+            <option value="具体信息点">具体信息点</option>
+            <option value="反差反常识">反差反常识</option>
+            <option value="利益直给">利益直给</option>
+            <option value="其他">其他</option>
+          </select>
+        </label>
+      </div>
+      <label style="display:block;margin-top:10px;">备注（选填）<input type="text" id="recNote" placeholder="如：发了朋友圈 / 被转发到群里"></label>
+      <div style="margin-top:14px;display:flex;gap:8px;">
+        <button class="primary wide" id="recSaveBtn" onclick="saveRecord()">保存数据</button>
+        <button class="ghost" id="recDelBtn" onclick="deleteRecord()" style="display:none;">删除记录</button>
+      </div>
     </div>
   </div>
 </div>
@@ -384,6 +495,7 @@ function toast(msg) {
 // 从审核链接里读出一次密码，后续所有请求都带上。
 // 服务端也会记住登录会话，这里是双保险（防止个别浏览器禁 cookie）。
 const PWD = new URLSearchParams(location.search).get('pwd') || '';
+window.__records = {{ analytics_records | tojson }};
 function withPwd(path) {
   if (!PWD) return path;
   return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(PWD);
@@ -541,6 +653,59 @@ function closeTitleModal() { document.getElementById('titleModal').classList.rem
 document.getElementById('titleModal').addEventListener('click', function (e) {
   if (e.target === this) closeTitleModal();
 });
+
+// ---- 发布后数据录入 ----
+let recArticleId = '';
+function openRecord(id) {
+  recArticleId = id;
+  const titleEl = document.getElementById('title-' + id);
+  document.getElementById('recordTitle').textContent = '稿件：' + (titleEl ? titleEl.value : id);
+  // 已有记录则回填；没有就清空
+  const existing = (window.__records || []).find(r => r.article_id === id);
+  document.getElementById('recViews').value = existing ? existing.views : '';
+  document.getElementById('recLikes').value = existing ? existing.likes : '';
+  document.getElementById('recShares').value = existing ? existing.shares : '';
+  document.getElementById('recFollowers').value = existing ? existing.followers : '';
+  document.getElementById('recDate').value = existing ? (existing.date || '') : '';
+  document.getElementById('recFormula').value = existing ? (existing.formula || '') : '';
+  document.getElementById('recNote').value = existing ? (existing.note || '') : '';
+  document.getElementById('recDelBtn').style.display = existing ? '' : 'none';
+  document.getElementById('recordModal').classList.add('show');
+}
+function closeRecordModal() { document.getElementById('recordModal').classList.remove('show'); }
+document.getElementById('recordModal').addEventListener('click', function (e) {
+  if (e.target === this) closeRecordModal();
+});
+async function saveRecord() {
+  const btn = document.getElementById('recSaveBtn');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const r = await api('/analytics/record', {
+      id: recArticleId,
+      views: parseInt(document.getElementById('recViews').value, 10) || 0,
+      likes: parseInt(document.getElementById('recLikes').value, 10) || 0,
+      shares: parseInt(document.getElementById('recShares').value, 10) || 0,
+      followers: parseInt(document.getElementById('recFollowers').value, 10) || 0,
+      date: document.getElementById('recDate').value,
+      formula: document.getElementById('recFormula').value,
+      note: document.getElementById('recNote').value
+    });
+    if (r.ok) {
+      toast('已记录：传播效率 ' + r.record.efficiency + '（每千次阅读互动数）');
+      closeRecordModal();
+      setTimeout(() => location.reload(), 700);
+    } else { toast(r.error || '保存失败'); }
+  } catch (e) { toast('保存失败：' + e); }
+  finally { btn.disabled = false; btn.textContent = '保存数据'; }
+}
+async function deleteRecord() {
+  if (!confirm('删除这篇的复盘数据？')) return;
+  try {
+    const r = await api('/analytics/delete', {id: recArticleId});
+    if (r.ok) { toast('已删除'); closeRecordModal(); setTimeout(() => location.reload(), 700); }
+    else { toast(r.error || '删除失败'); }
+  } catch (e) { toast('删除失败：' + e); }
+}
 
 async function setStatus(id, status) {
   const r = await api('/update', {id: id, status: status});
