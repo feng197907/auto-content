@@ -429,7 +429,12 @@ def analytics_record() -> Any:
         return jsonify({"ok": False, "error": "稿件不存在（可能已被清理）"}), 404
 
     try:
-        record = analytics.upsert(article, data, formula=data.get("formula", ""))
+        record = analytics.upsert(
+            article,
+            data,
+            formula=data.get("formula", ""),
+            channel=data.get("channel", ""),
+        )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "record": record})

@@ -134,9 +134,12 @@ def sync_from_analytics() -> dict[str, Any]:
     source_pref = ""
 
     for insight in summary.get("insights", []):
+        # 结论里的措辞是「标题公式里…优先用前者」「选题来源里…多看这个源」。
+        # 早先按「来自…」匹配来源那条，改过措辞后就永远匹配不上，
+        # 结果标题偏好能写回、来源偏好一直空着——这里按现在的措辞认。
         if "标题" in insight and "优先用前者" in insight:
             title_pref = insight
-        elif "来自" in insight and "多看这个源" in insight:
+        elif "选题来源" in insight and "多看这个源" in insight:
             source_pref = insight
 
     if title_pref:

@@ -296,15 +296,15 @@
   </div>
 
   <details class="review-panel" id="analyticsBox">
-    <summary>数据复盘 · 已录 {{ analytics.total }} 篇</summary>
+    <summary>数据复盘 · 已录 {{ analytics.total }} 篇（{{ analytics.posts }} 条记录 · 合计 {{ analytics.total_views }} 阅读）</summary>
     <div class="rp-body">
       {% if analytics.total == 0 %}
       <div class="rp-empty">还没录数据。在下面已发布的稿件上点「录数据」，把公众号后台的阅读/在看/转发填进来，攒几篇就能看出哪类标题有效。</div>
       {% else %}
       {% for ins in analytics.insights %}<div class="rp-insight">{{ ins }}</div>{% endfor %}
-      {% set maxval = analytics.by_formula[0][analytics.metric] or 1 %}
+      {% set maxval = (analytics.by_formula[0][analytics.metric] if analytics.by_formula else 0) or 1 %}
       <div class="rp-group">
-        <h4>按标题公式{% if analytics.metric == 'avg_efficiency' %}（互动效率 = 每千次阅读的互动数）{% else %}（按平均阅读人数：还没录点赞/在看，录了会自动切换成互动效率）{% endif %}</h4>
+        <h4>按标题公式{% if analytics.metric == 'avg_efficiency' %}（互动效率 = 每千次阅读的互动数）{% else %}（按平均阅读人数：互动样本还不够做效率对比，够了会自动切换）{% endif %}</h4>
         {% for g in analytics.by_formula %}
         <div class="rp-row"><span class="nm">{{ g.name }}</span>
           <span class="bar"><i style="width:{{ (g[analytics.metric] / maxval * 100) | round | int }}%"></i></span>
@@ -325,6 +325,32 @@
           <span class="val">均阅读 {{ g.avg_views }} · 效率 {{ g.avg_efficiency }} · {{ g.count }} 篇</span></div>
         {% endfor %}
       </div>
+      <div class="rp-group">
+        <h4>按渠道（文章推给粉丝，贴图会被推荐给非粉丝，同一篇各存一条）</h4>
+        {% for g in analytics.by_channel %}
+        <div class="rp-row"><span class="nm">{{ g.name }}</span>
+          <span class="val">均阅读 {{ g.avg_views }} · 互动效率 {{ g.avg_efficiency }} · {{ g.count }} 条</span></div>
+        {% endfor %}
+      </div>
+      <div class="rp-group">
+        <h4>按品类（历史随笔是 2026-04 那批，受众基数不同，单独对照）</h4>
+        {% for g in analytics.by_genre %}
+        <div class="rp-row"><span class="nm">{{ g.name }}</span>
+          <span class="val">均阅读 {{ g.avg_views }} · {{ g.count }} 篇</span></div>
+        {% endfor %}
+        {% if analytics.excluded %}
+        <div class="hint" style="font-size:11px;color:var(--muted);margin-top:6px;">历史随笔 {{ analytics.excluded }} 篇不进上面「公式 / 来源 / 篇幅」三组的均值，免得把半年前的阅读量混进现在的标题对比。</div>
+        {% endif %}
+      </div>
+      {% if analytics.top %}
+      <div class="rp-group">
+        <h4>单篇明细（按总阅读排序，括号里是两个渠道）</h4>
+        {% for it in analytics.top %}
+        <div class="rp-row"><span class="nm" style="flex:2;">{{ it.title }}</span>
+          <span class="val">{{ it.views }} 阅读{% if it.channel_note %} · {{ it.channel_note }}{% endif %}</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
       {% endif %}
     </div>
   </details>
@@ -631,8 +657,14 @@
     <div class="modal-body">
       <div class="copy-tip" id="recordTitle"></div>
       <div class="rec-grid">
+        <label>渠道
+          <select id="recChannel" onchange="fillRecord()">
+            <option value="文章">文章（推给粉丝）</option>
+            <option value="贴图">贴图（推给非粉丝）</option>
+          </select>
+        </label>
         <label>阅读数<input type="number" id="recViews" min="0" placeholder="公众号后台阅读"></label>
-        <label>在看<input type="number" id="recLikes" min="0" placeholder="点赞在看"></label>
+        <label>点赞 / 在看<input type="number" id="recLikes" min="0" placeholder="点赞 + 在看合计"></label>
         <label>转发<input type="number" id="recShares" min="0" placeholder="分享转发"></label>
         <label>涨粉<input type="number" id="recFollowers" min="0" placeholder="本期新增关注"></label>
         <label>发布日期<input type="date" id="recDate"></label>
@@ -646,6 +678,7 @@
           </select>
         </label>
       </div>
+      <div class="hint" style="font-size:11px;color:var(--muted);margin-top:8px;">同一篇在「文章」和「贴图」各录一次：两边阅读是分开统计的，贴图会推给非粉丝。切换渠道会自动回填该渠道已存的数据。</div>
       <label style="display:block;margin-top:10px;">备注（选填）<input type="text" id="recNote" placeholder="如：发了朋友圈 / 被转发到群里"></label>
       <div style="margin-top:14px;display:flex;gap:8px;">
         <button class="primary wide" id="recSaveBtn" onclick="saveRecord()">保存数据</button>
@@ -981,8 +1014,18 @@ function openRecord(id) {
   recArticleId = id;
   const titleEl = document.getElementById('title-' + id);
   document.getElementById('recordTitle').textContent = '稿件：' + (titleEl ? titleEl.value : id);
-  // 已有记录则回填；没有就清空
-  const existing = (window.__records || []).find(r => r.article_id === id);
+  // 默认按「文章」打开；要录贴图数据就在弹窗里切渠道
+  document.getElementById('recChannel').value = '文章';
+  fillRecord();
+  document.getElementById('recordModal').classList.add('show');
+}
+// 按当前稿件 + 当前渠道回填。两个渠道各存一条记录，切换渠道要重新读一次，
+// 否则会把文章的数字带进贴图那条里。
+function fillRecord() {
+  const channel = document.getElementById('recChannel').value || '文章';
+  const existing = (window.__records || []).find(function (r) {
+    return r.article_id === recArticleId && (r.channel || '文章') === channel;
+  });
   document.getElementById('recViews').value = existing ? existing.views : '';
   document.getElementById('recLikes').value = existing ? existing.likes : '';
   document.getElementById('recShares').value = existing ? existing.shares : '';
@@ -991,7 +1034,6 @@ function openRecord(id) {
   document.getElementById('recFormula').value = existing ? (existing.formula || '') : '';
   document.getElementById('recNote').value = existing ? (existing.note || '') : '';
   document.getElementById('recDelBtn').style.display = existing ? '' : 'none';
-  document.getElementById('recordModal').classList.add('show');
 }
 function closeRecordModal() { document.getElementById('recordModal').classList.remove('show'); }
 document.getElementById('recordModal').addEventListener('click', function (e) {
@@ -1003,6 +1045,7 @@ async function saveRecord() {
   try {
     const r = await api('/analytics/record', {
       id: recArticleId,
+      channel: document.getElementById('recChannel').value || '文章',
       views: parseInt(document.getElementById('recViews').value, 10) || 0,
       likes: parseInt(document.getElementById('recLikes').value, 10) || 0,
       shares: parseInt(document.getElementById('recShares').value, 10) || 0,
