@@ -7,10 +7,11 @@
   登录完成后把 profile 目录传到服务器，服务器从此免登录存草稿。
 
 用法（在项目根目录执行）：
-    py -3 -m pip install playwright
-    py -3 -m playwright install chromium
+    py -3 -m pip install playwright -i https://pypi.tuna.tsinghua.edu.cn/simple
     py -3 local_login.py toutiao      # 弹浏览器 → 手动拖滑块/收短信登录 → 回命令行按回车
     py -3 local_login.py baijia
+  脚本会自动用系统自带的 Edge/Chrome，不需要再下载 Chromium（省 100 多 MB）。
+  只有系统没有 Edge/Chrome 时才需要：playwright install chromium（记得设国内镜像）。
 
 登录成功后，把下面这些文件/目录整体传到服务器 /opt/auto-content/data/ 对应位置：
     data/toutiao_profile/        → /opt/auto-content/data/toutiao_profile/
@@ -27,10 +28,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-# 服务器配置里的 Chromium 路径在本地无效，本地登录时忽略它，用 Playwright 自带浏览器
+# 服务器配置里的 Chromium 路径在本地无效。本地优先用系统自带的 Edge/Chrome，
+# 省掉 playwright install chromium 那一步的下载（国内慢且容易断）。
 import config  # noqa: E402
 
 config.BROWSER_EXECUTABLE_PATH = ""
+_EDGE_PATHS = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
+for _p in _EDGE_PATHS:
+    if Path(_p).exists():
+        config.BROWSER_EXECUTABLE_PATH = _p
+        break
 
 
 def main() -> None:
@@ -42,9 +54,9 @@ def main() -> None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("还没装 Playwright，先执行：")
-        print("  py -3 -m pip install playwright")
-        print("  py -3 -m playwright install chromium")
+        print("还没装 Playwright，先执行（国内镜像加速）：")
+        print("  py -3 -m pip install playwright -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        print("本脚本用系统自带的 Edge/Chrome，不需要 playwright install chromium。")
         sys.exit(1)
 
     if platform == "toutiao":
