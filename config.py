@@ -620,4 +620,9 @@ if not BROWSER_EXECUTABLE_PATH:
             BROWSER_EXECUTABLE_PATH = _chrome_path
             break
 TOUTIAO_HEADLESS = os.getenv("TOUTIAO_HEADLESS", "1") == "1"  # 服务器无头运行
-TOUTIAO_ENABLED = os.getenv("TOUTIAO_ENABLED", "1") == "1"    # 总开关，出问题可关掉入口
+# 头条/百家号「自动存草稿」总开关（两家共用）。
+# 2026-11-24 起默认关闭：两家的登录风控（异地/滑块）和发布签名（msToken/a_bogus）
+# 变化频繁，自动维护成本远高于收益，改为审核页「复制成品」手动粘贴发布。
+# 要恢复自动存草稿：设 TOUTIAO_ENABLED=1，并把 local_login.py 导出的
+# data/toutiao_cookies.json、data/baijia_cookies.json 放到服务器 data/ 下。
+TOUTIAO_ENABLED = os.getenv("TOUTIAO_ENABLED", "0") == "1"
