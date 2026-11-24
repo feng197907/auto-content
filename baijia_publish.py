@@ -686,14 +686,6 @@ class BaijiaPublisher:
         """把稿件存成百家号草稿（点「存草稿」，绝不点「发布」）。"""
         if not playwright_ready():
             raise BaijiaError("服务器还没装 Playwright，无法自动存草稿")
-        # 实测登录态：state.json 的死标记会撒谎，用它拦截失效 profile，
-        # 避免跳到登录页后死等标题/正文框（前端一直转圈）。
-        if not configured(verify=True):
-            raise BaijiaError(
-                "百家号登录态已失效。请在本地跑 local_login.py baijia 重新登录，"
-                "把 data/baijia_cookies.json 传上服务器后重启服务"
-            )
-
         title = (article.get("title") or "").strip()
         if not title:
             raise BaijiaError("稿件标题为空")
@@ -706,6 +698,13 @@ class BaijiaPublisher:
             # 用 domcontentloaded 避免第三方资源拖住 load 事件直到超时
             page.goto(EDIT_URL, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
+            # 就地判断登录态：被踢到登录页就直接报错，不再死等标题框
+            if "/login" in page.url or "theme/bjh" in page.url:
+                ctx.close()
+                raise BaijiaError(
+                    "百家号登录态已失效。请在本地跑 local_login.py baijia 重新登录，"
+                    "把 data/baijia_cookies.json 传上服务器后重启服务"
+                )
             self._close_popups(page)
 
             # 1) 标题

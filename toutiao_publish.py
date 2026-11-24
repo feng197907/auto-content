@@ -698,14 +698,6 @@ class ToutiaoPublisher:
         """
         if not playwright_ready():
             raise ToutiaoError("服务器还没装 Playwright，无法自动存草稿")
-        # 实测登录态：state.json 的死标记会撒谎（profile 无登录 cookie 却写 true），
-        # 用它拦截，避免直接调发布接口拿 100005 获取用户信息失败。
-        if not configured(verify=True):
-            raise ToutiaoError(
-                "头条登录态已失效。请在本地跑 local_login.py toutiao 重新登录，"
-                "把 data/toutiao_cookies.json 传上服务器后重启服务"
-            )
-
         title = (article.get("title") or "").strip()
         if len(title) < 2 or len(title) > 30:
             raise ToutiaoError(f"头条标题要求 2-30 字，当前 {len(title)} 字：{title}")
@@ -720,6 +712,14 @@ class ToutiaoPublisher:
             page.goto(f"{TT_BASE}/profile_v4/graphic/publish",
                       wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
+            # 登录态就地判断：不再另开浏览器 verify（连续开会被风控误判失效）。
+            # 发布页本身被踢到 login/passport 就说明登录态失效。
+            if not COOKIES_FILE.exists() and ("login" in page.url or "passport" in page.url):
+                ctx.close()
+                raise ToutiaoError(
+                    "头条登录态已失效。请在本地跑 local_login.py toutiao 重新登录，"
+                    "把 data/toutiao_cookies.json 传上服务器后重启服务"
+                )
 
             # 1) 封面（可选）：封面单独用 upload_source=20020003
             cover = local_image_path(article.get("cover", ""))
