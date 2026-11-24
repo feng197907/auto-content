@@ -190,7 +190,21 @@ def summarize() -> dict[str, Any]:
     """按公式 / 来源 / 字数档聚合，给出平均表现和结论。"""
     records = load_records()
     if not records:
-        return {"total": 0, "by_formula": [], "by_source": [], "by_length": [], "insights": []}
+        return {
+            "total": 0, "by_formula": [], "by_source": [], "by_length": [],
+            "insights": [], "metric": "avg_views", "metric_label": "平均阅读",
+        }
+
+    # 只录了阅读数、没录点赞/在看/转发时，"互动效率"恒为 0：
+    # 按它排序等于随机排，还会得出"0.0 明显高于 0.0"这种假结论
+    # （2026-11-24 实录：8 篇全部为 0，结论指向了阅读量最低的那组）。
+    # 这种情况改用平均阅读做主指标，等录了互动数据再自动切回来。
+    has_interaction = any(
+        (r.get("likes", 0) or 0) + (r.get("shares", 0) or 0) + (r.get("followers", 0) or 0) > 0
+        for r in records
+    )
+    metric = "avg_efficiency" if has_interaction else "avg_views"
+    metric_label = "平均互动效率" if has_interaction else "平均阅读"
 
     def group_by(key: str) -> list[dict[str, Any]]:
         buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -205,34 +219,40 @@ def summarize() -> dict[str, Any]:
                 "name": name, "count": n,
                 "avg_views": avg_views, "avg_efficiency": avg_eff,
             })
-        out.sort(key=lambda x: x["avg_efficiency"], reverse=True)
+        # 排序必须跟结论用的指标一致，否则页面从上到下看和文字结论对不上
+        out.sort(key=lambda x: (x[metric], x["count"]), reverse=True)
         return out
 
     by_formula = group_by("formula")
     by_source = group_by("source_bucket")
     by_length = group_by("word_grade")
 
-    # 结论：样本 >= 2 的组里，互动效率最高/最低的给提示
+    # 结论：每组至少 2 篇、至少两组可比，且第一名比最后一名高出 20% 才说。
+    # 没有阈值时"43 对 30"会被写成"明显高于"，其实只是差一篇稿的量。
     insights: list[str] = []
-    valid_formula = [g for g in by_formula if g["count"] >= 2]
-    if len(valid_formula) >= 2:
-        best, worst = valid_formula[0], valid_formula[-1]
-        if best["name"] != worst["name"]:
-            insights.append(
-                f"「{best['name']}」标题平均互动效率 {best['avg_efficiency']}，"
-                f"明显高于「{worst['name']}」的 {worst['avg_efficiency']}——"
-                f"下次写标题可优先用前者。"
-            )
-    valid_source = [g for g in by_source if g["count"] >= 2]
-    if len(valid_source) >= 2:
-        best, worst = valid_source[0], valid_source[-1]
-        if best["name"] != worst["name"]:
-            insights.append(
-                f"来自「{best['name']}」的选题表现更好（效率 {best['avg_efficiency']} vs {worst['avg_efficiency']}），"
-                f"可考虑多看这个源。"
-            )
-    if records and not insights:
-        insights.append("样本还太少（每个分组要 2 篇以上才给结论），继续录入几篇就能看出规律。")
+    for groups, subject, action in (
+        (by_formula, "标题公式", "下次写标题可优先用前者"),
+        (by_source, "选题来源", "可考虑多看这个源"),
+        (by_length, "篇幅", "可按这个档位来写"),
+    ):
+        valid = [g for g in groups if g["count"] >= 2]
+        if len(valid) < 2:
+            continue
+        best, worst = valid[0], valid[-1]
+        if best["name"] == worst["name"]:
+            continue
+        base = worst[metric]
+        if base <= 0 or best[metric] < base * 1.2:
+            continue
+        insights.append(
+            f"{subject}里「{best['name']}」的{metric_label} {best[metric]}，"
+            f"高于「{worst['name']}」的 {worst[metric]}——{action}。"
+        )
+    if not insights:
+        insights.append(
+            "各组差距还看不出规律（要么样本不足 2 篇，要么差得不多），"
+            "继续录入几篇再看；录数据时把点赞、在看一起填上，能按互动效率比。"
+        )
 
     return {
         "total": len(records),
@@ -240,4 +260,6 @@ def summarize() -> dict[str, Any]:
         "by_source": by_source,
         "by_length": by_length,
         "insights": insights,
+        "metric": metric,
+        "metric_label": metric_label,
     }

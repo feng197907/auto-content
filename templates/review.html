@@ -302,13 +302,13 @@
       <div class="rp-empty">还没录数据。在下面已发布的稿件上点「录数据」，把公众号后台的阅读/在看/转发填进来，攒几篇就能看出哪类标题有效。</div>
       {% else %}
       {% for ins in analytics.insights %}<div class="rp-insight">{{ ins }}</div>{% endfor %}
-      {% set maxeff = analytics.by_formula[0].avg_efficiency or 1 %}
+      {% set maxval = analytics.by_formula[0][analytics.metric] or 1 %}
       <div class="rp-group">
-        <h4>按标题公式（互动效率 = 每千次阅读的互动数）</h4>
+        <h4>按标题公式{% if analytics.metric == 'avg_efficiency' %}（互动效率 = 每千次阅读的互动数）{% else %}（按平均阅读人数：还没录点赞/在看，录了会自动切换成互动效率）{% endif %}</h4>
         {% for g in analytics.by_formula %}
         <div class="rp-row"><span class="nm">{{ g.name }}</span>
-          <span class="bar"><i style="width:{{ (g.avg_efficiency / maxeff * 100) | round | int }}%"></i></span>
-          <span class="val">{{ g.avg_efficiency }} · {{ g.count }} 篇</span></div>
+          <span class="bar"><i style="width:{{ (g[analytics.metric] / maxval * 100) | round | int }}%"></i></span>
+          <span class="val">{{ g[analytics.metric] }} · {{ g.count }} 篇</span></div>
         {% endfor %}
       </div>
       <div class="rp-group">
