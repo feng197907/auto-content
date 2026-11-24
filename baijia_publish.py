@@ -182,13 +182,19 @@ class BaijiaPublisher:
     # 实测登录页：/builder/theme/bjh/login，按钮含「登录/注册百家号」「发送验证码」
     SMS_LOGIN_ENTRY_SELECTORS = (
         'button:has-text("登录/注册百家号")',
-        'button:has-text("登录")',
+        'button:has-text("立即登录")',
         'text=登录/注册百家号',
+        'button:has-text("登录")',
+        '[class*="login"]:has-text("登录")',
     )
     SMS_PHONE_SELECTORS = (
         'input[placeholder*="手机号"]',
         'input[placeholder*="手机"]',
         'input[type="tel"]:visible',
+        'input[autocomplete="tel"]',
+        # 百度 passport 常见类名 / 无名输入框，点入口后展开的表单
+        'input[name="phone"]', 'input[name="mobile"]', 'input[name="phoneNumber"]',
+        'input[class*="phone"]', 'input[class*="mobile"]',
     )
     SMS_CODE_SELECTORS = (
         'input[placeholder*="验证码"]',
@@ -346,14 +352,14 @@ class BaijiaPublisher:
                         "qr": False, "at": int(time.time()),
                     }
                     return
-                entry = self._find_first(page, self.SMS_LOGIN_ENTRY_SELECTORS)
+                # 点「登录/注册百家号」展开表单；入口可能在 iframe，用 _wait_first 找
+                entry = self._wait_first(page, self.SMS_LOGIN_ENTRY_SELECTORS, 3000)
                 if entry:
                     try:
                         entry.click(timeout=4000)
-                        page.wait_for_timeout(1500)
                     except Exception:
                         pass
-                phone_input = self._wait_first(page, self.SMS_PHONE_SELECTORS, 8000)
+                phone_input = self._wait_first(page, self.SMS_PHONE_SELECTORS, 10000)
 
             if not phone_input:
                 raise BaijiaError(
@@ -447,32 +453,49 @@ class BaijiaPublisher:
         return None
 
     @staticmethod
-    def _wait_first(page: Any, selectors, timeout_ms: int = 12000) -> Any:
-        """按候选顺序轮询等待第一个可见元素（登录页 JS 渲染慢，固定 sleep 会扑空）。"""
+    def _all_frames(page: Any) -> list:
+        """主 frame + 所有 iframe：百家号登录表单常在跨域 iframe 里。"""
+        try:
+            return list(page.frames)
+        except Exception:
+            return [page]
+
+    @classmethod
+    def _wait_first(cls, page: Any, selectors, timeout_ms: int = 12000) -> Any:
+        """轮询等待第一个可见元素，遍历所有 iframe（登录表单常藏在 iframe 里）。"""
         deadline = time.time() + timeout_ms / 1000.0
         while time.time() < deadline:
-            for sel in selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() and loc.is_visible():
-                        return loc
-                except Exception:
-                    continue
+            for frame in cls._all_frames(page):
+                for sel in selectors:
+                    try:
+                        loc = frame.locator(sel).first
+                        if loc.count() and loc.is_visible():
+                            return loc
+                    except Exception:
+                        continue
             page.wait_for_timeout(300)
         return None
 
-    @staticmethod
-    def _page_diag(page: Any) -> str:
-        """失败时抓页面摘要写进报错，省得每次都跑诊断脚本。"""
+    @classmethod
+    def _page_diag(cls, page: Any) -> str:
+        """失败时抓所有 frame 的输入框/按钮详情写进报错，省得再跑诊断脚本。"""
         try:
-            inputs = [
-                (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
-                for i in page.locator("input").all()[:8]
-            ]
-            # 也扫 [role=button]，避免漏掉 div 伪装的按钮（头条就踩过这个坑）
-            btns = [(b.inner_text() or "").strip()[:12]
-                    for b in page.locator("button, [role=button]").all()[:10]]
-            return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
+            frames = []
+            for fi, frame in enumerate(cls._all_frames(page)[:6]):
+                ins = []
+                for i in frame.locator("input").all()[:12]:
+                    try:
+                        ins.append({
+                            "t": i.get_attribute("type"), "ph": i.get_attribute("placeholder"),
+                            "n": i.get_attribute("name"), "id": i.get_attribute("id"),
+                            "cl": (i.get_attribute("class") or "")[:40],
+                        })
+                    except Exception:
+                        pass
+                btns = [(b.inner_text() or "").strip()[:12]
+                        for b in frame.locator("button, [role=button]").all()[:10]]
+                frames.append("f%d[%s] in=%s btn=%s" % (fi, frame.url[:50], ins, btns))
+            return " url=%s | %s" % (page.url, " || ".join(frames))
         except Exception:
             return " url=%s" % getattr(page, "url", "?")
 

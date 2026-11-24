@@ -1283,3 +1283,13 @@ crontab -l
 - **修法**：头条发码选择器改为 `.web-login-button-input__button-text`（按 class，不限标签）+ text 兜底；
   两家的 `_page_diag` 也改用 `button, [role=button]` 扫描，避免再漏 div 伪装的按钮。百家号发码同步加 text 兜底。
 - **验证**：11 项全 PASS，py_compile 通过，路由 32 不变。
+
+## 54. 百家号登录表单诊断增强：遍历 iframe + 输入框详情（2026-11-24）
+- **现象**：百家号报错摘要 `inputs=[全是空placeholder, codeString, safeFlag] buttons=[登录,登录/注册百家号,1,2,3,4]`——
+  表单结构和头条完全不同，placeholder 选择器全落空，且可能在 iframe 里。
+- **修法**：两家 `_wait_first` 改为遍历 `page.frames`（主 frame + 所有 iframe），登录表单藏 iframe 也能找到；
+  `_page_diag` 改为逐 frame 输出每个 input 的 type/placeholder/name/id/class + 按钮，下次报错自带完整 DOM。
+  百家号手机号选择器补 `input[name=phone|mobile]`、autocomplete=tel、class 含 phone/mobile；登录入口补「立即登录」，
+  点入口改用 `_wait_first`（遍历 iframe）并延长展开等待到 10 秒。
+- **验证**：10 项全 PASS（iframe 元素可找/主 frame 优先/全无返回 None/诊断详情/选择器扩展），路由不变。
+- **排查提示**：头条若仍报 `buttons=['登录']` 是旧代码（未 pull 6c6ed8a），先 `git pull && systemctl restart` 再测。

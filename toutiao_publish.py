@@ -286,37 +286,50 @@ class ToutiaoPublisher:
                 continue
         return None
 
-    def _wait_first(self, page: Any, selectors, timeout_ms: int = 12000) -> Any:
-        """按候选顺序轮询等待第一个可见元素。
+    @staticmethod
+    def _all_frames(page: Any) -> list:
+        """主 frame + 所有 iframe（登录表单可能藏在 iframe 里）。"""
+        try:
+            return list(page.frames)
+        except Exception:
+            return [page]
 
-        头条登录页是重 JS 应用：domcontentloaded 后还要几秒才渲染出表单。
-        固定 sleep + 瞬时 is_visible() 会扑空（实测报「找不到获取验证码按钮」），
-        这里元素一出现就立刻返回，兼顾快与稳。
-        """
+    @classmethod
+    def _wait_first(cls, page: Any, selectors, timeout_ms: int = 12000) -> Any:
+        """轮询等待第一个可见元素，遍历所有 iframe，元素一出现立刻返回。"""
         deadline = time.time() + timeout_ms / 1000.0
         while time.time() < deadline:
-            for sel in selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if loc.count() and loc.is_visible():
-                        return loc
-                except Exception:
-                    continue
+            for frame in cls._all_frames(page):
+                for sel in selectors:
+                    try:
+                        loc = frame.locator(sel).first
+                        if loc.count() and loc.is_visible():
+                            return loc
+                    except Exception:
+                        continue
             page.wait_for_timeout(300)
         return None
 
-    @staticmethod
-    def _page_diag(page: Any) -> str:
-        """失败时抓页面摘要写进报错，下次不用再跑诊断脚本。"""
+    @classmethod
+    def _page_diag(cls, page: Any) -> str:
+        """失败时抓所有 frame 的输入框/按钮详情写进报错。"""
         try:
-            inputs = [
-                (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
-                for i in page.locator("input").all()[:8]
-            ]
-            # 要扫 [role=button]：头条发码按钮就是 div[role=button]，不是 <button>
-            btns = [(b.inner_text() or "").strip()[:12]
-                    for b in page.locator("button, [role=button]").all()[:10]]
-            return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
+            frames = []
+            for fi, frame in enumerate(cls._all_frames(page)[:6]):
+                ins = []
+                for i in frame.locator("input").all()[:12]:
+                    try:
+                        ins.append({
+                            "t": i.get_attribute("type"), "ph": i.get_attribute("placeholder"),
+                            "n": i.get_attribute("name"), "id": i.get_attribute("id"),
+                            "cl": (i.get_attribute("class") or "")[:40],
+                        })
+                    except Exception:
+                        pass
+                btns = [(b.inner_text() or "").strip()[:12]
+                        for b in frame.locator("button, [role=button]").all()[:10]]
+                frames.append("f%d[%s] in=%s btn=%s" % (fi, frame.url[:50], ins, btns))
+            return " url=%s | %s" % (page.url, " || ".join(frames))
         except Exception:
             return " url=%s" % getattr(page, "url", "?")
 
