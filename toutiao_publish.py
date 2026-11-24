@@ -51,6 +51,9 @@ QR_FILE = ROOT / "data" / "toutiao_qr.png"
 # 登录任务状态（进程内，够用；服务重启归零无副作用）
 login_state: dict[str, Any] = {"status": "idle", "message": "", "qr": False, "at": 0}
 
+# 短信验证码登录：前端提交的手机号/验证码（worker 线程轮询捡取）
+sms_state: dict[str, str] = {"phone": "", "code": ""}
+
 
 class ToutiaoError(RuntimeError):
     """头条操作失败，消息已经翻成人话。"""
@@ -174,6 +177,30 @@ class ToutiaoPublisher:
     # 二维码会定时自动刷新，静态截图几十秒就失效；轮询期间按这个间隔重截
     _QR_REFRESH_SEC = 20
 
+    # ---- 短信验证码登录选择器（2026-11-24 服务器实测 DOM）----
+    # 头条登录页默认就渲染验证码表单，手机号/验证码输入框都在，无需切 tab。
+    SMS_PHONE_SELECTORS = (
+        'input[name="normal-input"]',      # 实测 placeholder=手机号
+        'input[placeholder="手机号"]',
+        'input[type="tel"]:visible',
+    )
+    SMS_CODE_SELECTORS = (
+        'input[name="button-input"]',      # 实测 placeholder=验证码
+        'input[placeholder="验证码"]',
+    )
+    SMS_SEND_BTN_SELECTORS = (
+        'button.web-login-button-input__button-text',  # 实测 class 含 send-input
+        'button:has-text("获取验证码")',
+    )
+    SMS_SUBMIT_BTN_SELECTORS = (
+        'button.web-login-button:not(.web-login-button__disabled)',
+        'button.web-login-button',
+        'button:has-text("登录")',
+    )
+    SMS_TAB_SELECTORS = (               # 若页面默认不是验证码登录，尝试切过去
+        'text=验证码登录',
+    )
+
     def _capture_qr(self, page: Any) -> None:
         """把当前登录页的二维码截到 QR_FILE；每轮重截，避免用户扫到过期码。"""
         global login_state
@@ -241,6 +268,170 @@ class ToutiaoPublisher:
                 "status": "error", "message": f"登录失败：{exc}",
                 "qr": False, "at": int(time.time()),
             }
+
+    # ---- 短信验证码登录（两步式：发码 → 用户填码 → 提交登录）----
+    @staticmethod
+    def _find_first(page: Any, selectors: tuple[str, ...] | list[str]) -> Any:
+        """按候选顺序找第一个可见元素，找不到返回 None。"""
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() and loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        return None
+
+    def send_code(self, phone: str) -> None:
+        """第一步：打开登录页 → 填手机号 → 点「获取验证码」。
+
+        后台线程保持同一个浏览器会话，停在等待验证码状态；前端拿到短信后
+        调 submit_code(code)，worker 在同一上下文里填码登录、保存登录态。
+        手机号只做基本格式校验，不存进任何文件（只在进程内传递）。
+        """
+        global login_state, sms_state
+        if not playwright_ready():
+            raise ToutiaoError("服务器还没装 Playwright，无法自动登录")
+        phone = (phone or "").strip()
+        if not (phone.isdigit() and len(phone) == 11):
+            raise ToutiaoError("请输入 11 位手机号")
+        if login_state.get("status") in ("sending", "code_sent", "verifying"):
+            raise ToutiaoError("登录正在进行中，请稍候或刷新页面查看进度")
+        if STATE_FILE.exists() and _load_state().get("logged_in"):
+            raise ToutiaoError("头条已登录，无需重新发码")
+        sms_state = {"phone": phone, "code": ""}
+        login_state = {
+            "status": "sending", "message": "正在打开登录页…",
+            "qr": False, "at": int(time.time()),
+        }
+        import threading
+
+        threading.Thread(target=self._sms_login_worker, daemon=True).start()
+
+    def submit_code(self, code: str) -> None:
+        """第二步：把用户收到的短信验证码交给后台 worker（worker 在同一会话里登录）。"""
+        global login_state
+        if login_state.get("status") != "code_sent":
+            raise ToutiaoError("当前不是等待验证码状态，请先点「发送验证码」")
+        code = (code or "").strip()
+        if not (code.isdigit() and 4 <= len(code) <= 8):
+            raise ToutiaoError("验证码应为 4-8 位数字")
+        # 用模块级变量传递，worker 轮询读取；同一时刻只有一个登录会话
+        sms_state["code"] = code
+        login_state = {
+            "status": "verifying", "message": "正在提交验证码…",
+            "qr": False, "at": int(time.time()),
+        }
+
+    def _sms_login_worker(self) -> None:
+        """后台线程：一个浏览器会话内完成 填手机号→发码→等待→填验证码→登录。"""
+        global login_state
+        pw_ctx: Any = None
+        browser_ctx: Any = None
+        try:
+            from playwright.sync_api import sync_playwright
+
+            pw_ctx = sync_playwright().start()
+            browser_ctx = self._launch(pw_ctx)
+            page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
+            page.goto(f"{TT_BASE}/profile_v4/graphic/publish", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2500)
+
+            # 已登录（没落到登录页）直接成功
+            if "login" not in page.url and "passport" not in page.url:
+                _save_state({"logged_in": True})
+                login_state = {
+                    "status": "success", "message": "头条已登录（无需验证码）",
+                    "qr": False, "at": int(time.time()),
+                }
+                return
+
+            # 若默认不在验证码登录 tab，尝试切过去（无害；实测默认就在）
+            tab = self._find_first(page, self.SMS_TAB_SELECTORS)
+            if tab:
+                try:
+                    tab.click(timeout=2000)
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+            phone_input = self._find_first(page, self.SMS_PHONE_SELECTORS)
+            if not phone_input:
+                raise ToutiaoError("没找到手机号输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+            phone_input.fill(sms_state["phone"])
+            page.wait_for_timeout(300)
+
+            send_btn = self._find_first(page, self.SMS_SEND_BTN_SELECTORS)
+            if not send_btn:
+                raise ToutiaoError("没找到「获取验证码」按钮（页面可能改版），跑诊断脚本把 DOM 发 AI")
+            send_btn.click(timeout=8000)
+            login_state = {
+                "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
+                "qr": False, "at": int(time.time()),
+            }
+
+            # 最多等 5 分钟：前端提交 code 后轮询读取
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                page.wait_for_timeout(1000)
+                if sms_state.get("code"):
+                    break
+                if login_state.get("status") == "cancelled":
+                    break
+            if not sms_state.get("code"):
+                login_state = {
+                    "status": "timeout", "message": "等验证码超时，请重新发送",
+                    "qr": False, "at": int(time.time()),
+                }
+                return
+
+            code_input = self._find_first(page, self.SMS_CODE_SELECTORS)
+            if not code_input:
+                raise ToutiaoError("没找到验证码输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+            code_input.fill(sms_state["code"])
+            page.wait_for_timeout(300)
+
+            submit_btn = self._find_first(page, self.SMS_SUBMIT_BTN_SELECTORS)
+            if not submit_btn:
+                raise ToutiaoError("没找到「登录」按钮（页面可能改版），跑诊断脚本把 DOM 发 AI")
+            submit_btn.click(timeout=8000)
+
+            # 轮询登录是否成功（URL 离开登录页）
+            deadline2 = time.time() + 60
+            logged = False
+            while time.time() < deadline2:
+                page.wait_for_timeout(2000)
+                if "login" not in page.url and "passport" not in page.url:
+                    logged = True
+                    break
+            if logged:
+                _save_state({"logged_in": True})
+                login_state = {
+                    "status": "success", "message": "登录成功，登录态已保存",
+                    "qr": False, "at": int(time.time()),
+                }
+            else:
+                login_state = {
+                    "status": "error", "message": "验证码提交后未跳转，可能验证码错误，请重试",
+                    "qr": False, "at": int(time.time()),
+                }
+        except Exception as exc:  # noqa: BLE001
+            login_state = {
+                "status": "error", "message": f"登录失败：{exc}",
+                "qr": False, "at": int(time.time()),
+            }
+        finally:
+            # 会话用完就关：登录态已在 persistent profile 里，下次免登录
+            try:
+                if browser_ctx is not None:
+                    browser_ctx.close()
+            except Exception:
+                pass
+            try:
+                if pw_ctx is not None:
+                    pw_ctx.stop()
+            except Exception:
+                pass
 
     def upload_image(self, page: Any, image_bytes: bytes, mime: str = "image/jpeg") -> dict[str, Any]:
         """上传图片到头条 CDN，返回 {image_url, image_uri, width, height}。

@@ -643,6 +643,32 @@ def toutiao_status() -> Any:
     })
 
 
+@app.route("/toutiao/send-code", methods=["POST"])
+def toutiao_send_code() -> Any:
+    """短信登录第一步：发验证码（后台会话保留，等前端提交 code）。"""
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "头条入口已关闭"}), 400
+    if not toutiao_publish.playwright_ready():
+        return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        toutiao_publish.ToutiaoPublisher().send_code(str(data.get("phone", "")))
+    except toutiao_publish.ToutiaoError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "started": True})
+
+
+@app.route("/toutiao/submit-code", methods=["POST"])
+def toutiao_submit_code() -> Any:
+    """短信登录第二步：提交验证码，后台 worker 完成登录。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        toutiao_publish.ToutiaoPublisher().submit_code(str(data.get("code", "")))
+    except toutiao_publish.ToutiaoError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
+
+
 @app.route("/toutiao/qr")
 def toutiao_qr() -> Any:
     """返回登录二维码图片（扫码登录期间生成）。"""
@@ -739,6 +765,32 @@ def baijia_status() -> Any:
         "login": dict(baijia_publish.login_state),
         "draft": dict(baijia_draft_state),
     })
+
+
+@app.route("/baijia/send-code", methods=["POST"])
+def baijia_send_code() -> Any:
+    """短信登录第一步：发验证码。"""
+    if not getattr(config, "TOUTIAO_ENABLED", True):
+        return jsonify({"ok": False, "error": "百家号入口已关闭"}), 400
+    if not baijia_publish.playwright_ready():
+        return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        baijia_publish.BaijiaPublisher().send_code(str(data.get("phone", "")))
+    except baijia_publish.BaijiaError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "started": True})
+
+
+@app.route("/baijia/submit-code", methods=["POST"])
+def baijia_submit_code() -> Any:
+    """短信登录第二步：提交验证码。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        baijia_publish.BaijiaPublisher().submit_code(str(data.get("code", "")))
+    except baijia_publish.BaijiaError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True})
 
 
 @app.route("/baijia/qr")

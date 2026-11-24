@@ -349,14 +349,14 @@
     </div>
   </details>
 
-  <!-- 头条号 / 百家号 登录管理（自动存草稿，不发布） -->
+  <!-- 头条号 / 百家号 登录管理（短信验证码登录，自动存草稿不发布） -->
   {% if toutiao_enabled %}
   <details class="review-panel" id="toutiaoBox">
-    <summary>头条号 / 百家号 · 自动存草稿（登录一次，之后稿件一键存草稿）</summary>
+    <summary>头条号 / 百家号 · 自动存草稿（短信登录一次，之后稿件一键存草稿）</summary>
     <div class="rp-body">
       <div class="rp-empty" style="margin-bottom:10px;">
         这两家都没有个人可用的官方发布 API，本功能只把稿件<b>存进草稿箱</b>，最后「发表」仍需你进各自后台点一下。
-        登录态存在服务器独立浏览器配置里，扫码一次长期复用。
+        扫码二维码会几十秒过期、百家号落地页又没有可截的码，所以改用<b>短信验证码登录</b>：填手机号→收到短信→填验证码，登录态存服务器长期复用。
       </div>
 
       <h4 style="margin:6px 0;">头条号</h4>
@@ -364,15 +364,17 @@
       <div class="rp-empty" style="color:#c2410c;">服务器还没装 Playwright，无法自动存草稿。安装命令见交付说明。</div>
       {% else %}
       <div id="ttLoginState" class="pf-msg">
-        {% if toutiao_logged_in %}✅ 头条已登录，可以直接给稿件存草稿{% else %}⚠️ 头条未登录，先扫码{% endif %}
+        {% if toutiao_logged_in %}✅ 头条已登录，可以直接给稿件存草稿{% else %}⚠️ 头条未登录，用短信验证码登录{% endif %}
       </div>
-      <div class="pf-actions">
-        <button class="primary" onclick="toutiaoLogin()">{{ '重新扫码登录' if toutiao_logged_in else '头条扫码登录' }}</button>
-      </div>
-      <div id="ttQrBox" style="display:none;margin-top:12px;text-align:center;">
-        <img id="ttQrImg" src="/toutiao/qr" alt="头条登录二维码"
-             style="max-width:220px;border:1px solid var(--line);border-radius:8px;">
-        <div class="hint" style="margin-top:6px;">用头条 App 扫码，二维码每 20 秒自动更新；扫完这里会变「登录成功」</div>
+      <div class="sms-login" style="margin-top:8px;">
+        <input id="ttPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="手机号"
+               style="max-width:180px;" {% if toutiao_logged_in %}disabled{% endif %}>
+        <button class="primary" onclick="toutiaoSendCode()" id="ttSendBtn"
+                {% if toutiao_logged_in %}disabled{% endif %}>发送验证码</button>
+        <input id="ttCode" type="text" inputmode="numeric" maxlength="8" placeholder="短信验证码"
+               style="max-width:130px;display:none;" {% if toutiao_logged_in %}disabled{% endif %}>
+        <button class="ghost" onclick="toutiaoSubmitCode()" id="ttLoginBtn" style="display:none;"
+                {% if toutiao_logged_in %}disabled{% endif %}>登录</button>
       </div>
       {% endif %}
 
@@ -381,15 +383,17 @@
       <div class="rp-empty" style="color:#c2410c;">服务器还没装 Playwright，无法自动存草稿。</div>
       {% else %}
       <div id="bjLoginState" class="pf-msg">
-        {% if baijia_logged_in %}✅ 百家号已登录，可以直接给稿件存草稿{% else %}⚠️ 百家号未登录，先扫码{% endif %}
+        {% if baijia_logged_in %}✅ 百家号已登录，可以直接给稿件存草稿{% else %}⚠️ 百家号未登录，用短信验证码登录{% endif %}
       </div>
-      <div class="pf-actions">
-        <button class="primary" onclick="baijiaLogin()">{{ '重新扫码登录' if baijia_logged_in else '百家号扫码登录' }}</button>
-      </div>
-      <div id="bjQrBox" style="display:none;margin-top:12px;text-align:center;">
-        <img id="bjQrImg" src="/baijia/qr" alt="百家号登录二维码"
-             style="max-width:220px;border:1px solid var(--line);border-radius:8px;">
-        <div class="hint" style="margin-top:6px;">用百度 App 扫码，二维码每 20 秒自动更新；扫完这里会变「登录成功」</div>
+      <div class="sms-login" style="margin-top:8px;">
+        <input id="bjPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="手机号"
+               style="max-width:180px;" {% if baijia_logged_in %}disabled{% endif %}>
+        <button class="primary" onclick="baijiaSendCode()" id="bjSendBtn"
+                {% if baijia_logged_in %}disabled{% endif %}>发送验证码</button>
+        <input id="bjCode" type="text" inputmode="numeric" maxlength="8" placeholder="短信验证码"
+               style="max-width:130px;display:none;" {% if baijia_logged_in %}disabled{% endif %}>
+        <button class="ghost" onclick="baijiaSubmitCode()" id="bjLoginBtn" style="display:none;"
+                {% if baijia_logged_in %}disabled{% endif %}>登录</button>
       </div>
       {% endif %}
     </div>
@@ -1197,50 +1201,57 @@ async function pushDraft(id) {
   }
 }
 
-/* ---- 头条号：扫码登录 + 存草稿（只存草稿不发布）---- */
-async function toutiaoLogin() {
-  const box = document.getElementById('ttQrBox');
+/* ---- 头条号：短信验证码登录 + 存草稿（只存草稿不发布）---- */
+async function toutiaoSendCode() {
+  const phoneEl = document.getElementById('ttPhone');
+  const phone = phoneEl ? phoneEl.value.trim() : '';
+  if (!/^\d{11}$/.test(phone)) { toast('请先填 11 位手机号'); return; }
   const state = document.getElementById('ttLoginState');
   try {
-    const r = await api('/toutiao/login', {});
-    if (!r.ok) { toast(r.error || '发起登录失败'); return; }
-    if (r.already) { toast('头条已经登录'); return; }
-    // 打开二维码区，开始轮询登录结果
-    if (box) box.style.display = '';
-    if (state) state.textContent = '正在打开登录页…';
-    pollToutiaoLogin(0);
-  } catch (e) { toast('发起登录失败：' + e); }
+    const r = await api('/toutiao/send-code', {phone: phone});
+    if (!r.ok) { toast(r.error || '发送验证码失败'); return; }
+    if (state) state.textContent = '正在打开头条登录页并发验证码…';
+    pollToutiaoSms(0);
+  } catch (e) { toast('发送验证码失败：' + e); }
 }
-function pollToutiaoLogin(times) {
-  if (times > 150) return; // 最多轮询约 5 分钟
+async function toutiaoSubmitCode() {
+  const codeEl = document.getElementById('ttCode');
+  const code = codeEl ? codeEl.value.trim() : '';
+  if (!code) { toast('请填短信验证码'); return; }
+  try {
+    const r = await api('/toutiao/submit-code', {code: code});
+    if (!r.ok) { toast(r.error || '提交失败'); return; }
+    pollToutiaoSms(0);
+  } catch (e) { toast('提交失败：' + e); }
+}
+function pollToutiaoSms(times) {
+  if (times > 180) return; // 最多约 6 分钟
   setTimeout(async function () {
     try {
       const r = await api('/toutiao/status', {});
       const st = r.login || {};
       const state = document.getElementById('ttLoginState');
-      const box = document.getElementById('ttQrBox');
-      if (box && st.qr) {
-        box.style.display = '';
-        // 二维码每 20 秒重截一次，这里带时间戳强制浏览器拉最新，避免扫到过期码
-        const img = document.getElementById('ttQrImg');
-        if (img && st.qr_at !== img.dataset.at) {
-          img.dataset.at = st.qr_at;
-          img.src = '/toutiao/qr?t=' + Date.now();
-        }
-      }
+      const codeBox = document.getElementById('ttCode');
+      const loginBtn = document.getElementById('ttLoginBtn');
+      const sendBtn = document.getElementById('ttSendBtn');
       if (state && st.message) state.textContent = st.message;
+      if (st.status === 'code_sent') {
+        if (codeBox) { codeBox.style.display = ''; codeBox.focus(); }
+        if (loginBtn) loginBtn.style.display = '';
+        if (sendBtn) sendBtn.textContent = '重新发送';
+      }
       if (st.status === 'success') {
-        if (box) box.style.display = 'none';
         toast('头条登录成功，登录态已保存');
         setTimeout(function () { location.reload(); }, 1000);
         return;
       }
       if (st.status === 'error' || st.status === 'timeout') {
         toast(st.message || '登录失败，请重试');
+        if (sendBtn) sendBtn.disabled = false;
         return;
       }
-      pollToutiaoLogin(times + 1);
-    } catch (e) { pollToutiaoLogin(times + 1); }
+      pollToutiaoSms(times + 1);
+    } catch (e) { pollToutiaoSms(times + 1); }
   }, 2000);
 }
 
@@ -1285,48 +1296,57 @@ function pollToutiaoDraft(id, btn, times, old) {
   }, 2000);
 }
 
-/* ---- 百家号：扫码登录 + 存草稿（只存草稿不发布，发布会触发滑块）---- */
-async function baijiaLogin() {
-  const box = document.getElementById('bjQrBox');
+/* ---- 百家号：短信验证码登录 + 存草稿（只存草稿不发布，发布会触发滑块）---- */
+async function baijiaSendCode() {
+  const phoneEl = document.getElementById('bjPhone');
+  const phone = phoneEl ? phoneEl.value.trim() : '';
+  if (!/^\d{11}$/.test(phone)) { toast('请先填 11 位手机号'); return; }
   const state = document.getElementById('bjLoginState');
   try {
-    const r = await api('/baijia/login', {});
-    if (!r.ok) { toast(r.error || '发起登录失败'); return; }
-    if (r.already) { toast('百家号已经登录'); return; }
-    if (box) box.style.display = '';
-    if (state) state.textContent = '正在打开登录页…';
-    pollBaijiaLogin(0);
-  } catch (e) { toast('发起登录失败：' + e); }
+    const r = await api('/baijia/send-code', {phone: phone});
+    if (!r.ok) { toast(r.error || '发送验证码失败'); return; }
+    if (state) state.textContent = '正在打开百家号登录页并发验证码…';
+    pollBaijiaSms(0);
+  } catch (e) { toast('发送验证码失败：' + e); }
 }
-function pollBaijiaLogin(times) {
-  if (times > 150) return;
+async function baijiaSubmitCode() {
+  const codeEl = document.getElementById('bjCode');
+  const code = codeEl ? codeEl.value.trim() : '';
+  if (!code) { toast('请填短信验证码'); return; }
+  try {
+    const r = await api('/baijia/submit-code', {code: code});
+    if (!r.ok) { toast(r.error || '提交失败'); return; }
+    pollBaijiaSms(0);
+  } catch (e) { toast('提交失败：' + e); }
+}
+function pollBaijiaSms(times) {
+  if (times > 180) return;
   setTimeout(async function () {
     try {
       const r = await api('/baijia/status', {});
       const st = r.login || {};
       const state = document.getElementById('bjLoginState');
-      const box = document.getElementById('bjQrBox');
-      if (box && st.qr) {
-        box.style.display = '';
-        const img = document.getElementById('bjQrImg');
-        if (img && st.qr_at !== img.dataset.at) {
-          img.dataset.at = st.qr_at;
-          img.src = '/baijia/qr?t=' + Date.now();
-        }
-      }
+      const codeBox = document.getElementById('bjCode');
+      const loginBtn = document.getElementById('bjLoginBtn');
+      const sendBtn = document.getElementById('bjSendBtn');
       if (state && st.message) state.textContent = st.message;
+      if (st.status === 'code_sent') {
+        if (codeBox) { codeBox.style.display = ''; codeBox.focus(); }
+        if (loginBtn) loginBtn.style.display = '';
+        if (sendBtn) sendBtn.textContent = '重新发送';
+      }
       if (st.status === 'success') {
-        if (box) box.style.display = 'none';
         toast('百家号登录成功，登录态已保存');
         setTimeout(function () { location.reload(); }, 1000);
         return;
       }
       if (st.status === 'error' || st.status === 'timeout') {
         toast(st.message || '登录失败，请重试');
+        if (sendBtn) sendBtn.disabled = false;
         return;
       }
-      pollBaijiaLogin(times + 1);
-    } catch (e) { pollBaijiaLogin(times + 1); }
+      pollBaijiaSms(times + 1);
+    } catch (e) { pollBaijiaSms(times + 1); }
   }, 2000);
 }
 
@@ -1401,22 +1421,28 @@ async function genCover(id, btn) {  if (!btn) btn = event && event.target;
   }
 })();
 
-// 页面刷新后自动续上正在进行的扫码登录：后台线程还在 waiting，前端不能断了轮询。
+// 页面刷新后自动续上正在进行的短信登录：后台线程还在等验证码，前端不能断了轮询。
 (async function resumeLoginPolls() {
-  async function resume(statusUrl, pollFn, boxId) {
-    const box = document.getElementById(boxId);
-    if (!box) return; // 该平台未启用 playwright，面板不存在
+  async function resume(statusUrl, pollFn, codeId, loginBtnId, stateId) {
+    const codeBox = document.getElementById(codeId);
+    if (!codeBox) return; // 该平台未启用 playwright，面板不存在
     try {
       const r = await api(statusUrl, {});
       const st = r.login || {};
-      if (st.status === 'waiting' && st.qr) {
-        box.style.display = '';
+      if (st.status === 'sending' || st.status === 'code_sent' || st.status === 'verifying') {
+        const state = document.getElementById(stateId);
+        if (state && st.message) state.textContent = st.message;
+        if (st.status === 'code_sent') {
+          codeBox.style.display = '';
+          const lb = document.getElementById(loginBtnId);
+          if (lb) lb.style.display = '';
+        }
         pollFn(0);
       }
     } catch (e) { /* 忽略：下次手动点登录即可 */ }
   }
-  await resume('/toutiao/status', pollToutiaoLogin, 'ttQrBox');
-  await resume('/baijia/status', pollBaijiaLogin, 'bjQrBox');
+  await resume('/toutiao/status', pollToutiaoSms, 'ttCode', 'ttLoginBtn', 'ttLoginState');
+  await resume('/baijia/status', pollBaijiaSms, 'bjCode', 'bjLoginBtn', 'bjLoginState');
 })();
 </script>
 </body>

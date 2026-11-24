@@ -1234,3 +1234,30 @@ crontab -l
   续轮询/路由数不变）。
 - **服务器生效**：`cd /opt/auto-content && git pull && systemctl restart auto-content`。
   注意：进程内 login_state 重启即清空，若之前有正在进行的扫码，重启后要重新点登录。
+
+## 51. 改用短信验证码登录（2026-11-24）——扫码方案废弃
+
+- **为什么放弃扫码**：连修三轮仍失败。服务器实测 DOM 显示：头条二维码是 `data:image/png;base64`
+  的动态短时效 token（截图必然过期，"20 秒重截"治标不治本）；百家号登录页 `/builder/theme/bjh/login`
+  压根没有可截的二维码，只有落地页宣传图。两家登录页都有手机号+短信验证码入口，改走短信更可靠。
+- **实测拿到的头条选择器**（诊断脚本 dump DOM）：手机号 `input[name="normal-input"]`、
+  验证码 `input[name="button-input"]`、发码按钮 `button.web-login-button-input__button-text`、
+  登录按钮 `button.web-login-button`。头条登录页默认就渲染验证码表单，无需切 tab。
+  百家号未拿到 input 明细（诊断脚本 goto 编辑页 load 超时中断），按占位符/文字多候选兜底，
+  并把诊断脚本 `_diag_sms.py` 改成直打登录页 + `domcontentloaded`，百家号若登录失败可再跑一次。
+- **两步式登录流程**（一个后台线程保持同一浏览器会话）：
+  1. `POST /toutiao/send-code {phone}` / `/baijia/send-code` → 线程打开登录页、填手机号、点发码，
+     login_state 进入 `code_sent`；
+  2. 前端轮询 status 看到 `code_sent` → 显示验证码输入框；用户填入短信码点登录 →
+     `POST /toutiao/submit-code {code}` / `/baijia/submit-code` → worker 在同一上下文填码登录、
+     成功写 `_save_state({logged_in:True})`，登录态存各自 profile 长期复用。
+  - 状态机：`sending → code_sent → verifying → success/error/timeout`；手机号只进程内传递不入文件。
+  - 进行中重复发码被拒（防两个 worker 抢同一 profile）；前端刷新后按 status 自动续轮询并回填验证码框。
+- **改动文件**：`toutiao_publish.py`、`baijia_publish.py`（`send_code`/`submit_code`/`_sms_login_worker`
+  + 选择器常量；旧的扫码方法保留但前端不再调用）、`app.py`（4 条短信路由）、`review.html`
+  （扫码面板换成手机号+验证码两步表单 + JS）、`_diag_sms.py`（百家号诊断修正）。
+- **验证**：37 项全 PASS（选择器/两步方法/状态校验/并发保护/路由/页面元素与 JS/无残留旧函数引用），
+  路由 28→32。本地无平台账号，真实发码登录仍需服务器实测。
+- **服务器生效**：`cd /opt/auto-content && git pull && systemctl restart auto-content`。
+  审核页展开「头条号/百家号」面板 → 填手机号点「发送验证码」→ 收到短信填码点「登录」。
+  百家号若登录失败，跑 `.venv/bin/python _diag_sms.py` 把 `BAIJIA_LANDING` 段贴给 AI 补选择器。

@@ -60,8 +60,21 @@ with sync_playwright() as pw:
 
     ctx = bj.BaijiaPublisher(headless=True)._launch(pw)
     p = ctx.pages[0] if ctx.pages else ctx.new_page()
-    p.goto(bj.EDIT_URL, timeout=30000)
+    # 编辑页未登录会跳登录页且 load 事件不触发，直接打登录页 + domcontentloaded
+    p.goto(bj.LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     p.wait_for_timeout(4000)
-    dump(p, "BAIJIA")
+    dump(p, "BAIJIA_LANDING")
+    # 落地页要先点「登录/注册百家号」才展开手机号表单
+    for sel in ["button:has-text('登录/注册百家号')", "text=登录/注册百家号",
+                "button:has-text('登录')"]:
+        try:
+            loc = p.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=1500):
+                loc.click(timeout=3000, force=True)
+                p.wait_for_timeout(3000)
+                dump(p, "BAIJIA_AFTER_LOGIN_CLICK")
+                break
+        except Exception as exc:
+            print(" bj click fail", sel, str(exc)[:80])
     ctx.close()
 print("DONE")

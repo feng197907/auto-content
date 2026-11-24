@@ -43,12 +43,17 @@ ROOT = Path(__file__).resolve().parent
 BJ_BASE = "https://baijiahao.baidu.com"
 EDIT_URL = f"{BJ_BASE}/builder/rc/edit?type=news&is_from_cms=1"
 HOME_URL = f"{BJ_BASE}/builder/rc/home"
+# 实测：未登录访问编辑页会落到这个登录页。短信登录直接打它，避免 EDIT_URL 的 load 超时。
+LOGIN_URL = f"{BJ_BASE}/builder/theme/bjh/login"
 PROFILE_DIR = ROOT / "data" / "baijia_profile"
 STATE_FILE = ROOT / "data" / "baijia_state.json"
 QR_FILE = ROOT / "data" / "baijia_qr.png"
 
 # 登录任务状态（进程内）
 login_state: dict[str, Any] = {"status": "idle", "message": "", "qr": False, "at": 0}
+
+# 短信验证码登录：前端提交的手机号/验证码（worker 线程轮询捡取）
+sms_state: dict[str, str] = {"phone": "", "code": ""}
 
 # 标题输入框候选（百家号前端改版时按实测补在这里）
 TITLE_SELECTORS = [
@@ -173,6 +178,31 @@ class BaijiaPublisher:
     )
     _QR_REFRESH_SEC = 20
 
+    # ---- 短信验证码登录选择器（百家号未拿到实测 input，按文字/占位符多候选兜底）----
+    # 实测登录页：/builder/theme/bjh/login，按钮含「登录/注册百家号」「发送验证码」
+    SMS_LOGIN_ENTRY_SELECTORS = (
+        'button:has-text("登录/注册百家号")',
+        'button:has-text("登录")',
+        'text=登录/注册百家号',
+    )
+    SMS_PHONE_SELECTORS = (
+        'input[placeholder*="手机号"]',
+        'input[placeholder*="手机"]',
+        'input[type="tel"]:visible',
+    )
+    SMS_CODE_SELECTORS = (
+        'input[placeholder*="验证码"]',
+        'input[maxlength="6"]:visible',
+    )
+    SMS_SEND_BTN_SELECTORS = (
+        'button:has-text("发送验证码")',
+        'button:has-text("获取验证码")',
+    )
+    SMS_SUBMIT_BTN_SELECTORS = (
+        'button:has-text("登录/注册百家号"):not([disabled])',
+        'button:has-text("登录")',
+    )
+
     def _capture_qr(self, page: Any) -> None:
         global login_state
         qr = page.locator(self._QR_SELECTORS)
@@ -251,6 +281,151 @@ class BaijiaPublisher:
                 "status": "error", "message": f"登录失败：{exc}",
                 "qr": False, "at": int(time.time()),
             }
+
+    # ---- 短信验证码登录（两步式）----
+    def send_code(self, phone: str) -> None:
+        """第一步：打开登录页 → 填手机号 → 点「发送验证码」，后台会话等待提交。"""
+        global login_state, sms_state
+        if not playwright_ready():
+            raise BaijiaError("服务器还没装 Playwright，无法自动登录")
+        phone = (phone or "").strip()
+        if not (phone.isdigit() and len(phone) == 11):
+            raise BaijiaError("请输入 11 位手机号")
+        if login_state.get("status") in ("sending", "code_sent", "verifying"):
+            raise BaijiaError("登录正在进行中，请稍候或刷新页面查看进度")
+        if STATE_FILE.exists() and _load_state().get("logged_in"):
+            raise BaijiaError("百家号已登录，无需重新发码")
+        sms_state = {"phone": phone, "code": ""}
+        login_state = {
+            "status": "sending", "message": "正在打开登录页…",
+            "qr": False, "at": int(time.time()),
+        }
+        import threading
+
+        threading.Thread(target=self._sms_login_worker, daemon=True).start()
+
+    def submit_code(self, code: str) -> None:
+        """第二步：把短信验证码交给后台 worker。"""
+        global login_state
+        if login_state.get("status") != "code_sent":
+            raise BaijiaError("当前不是等待验证码状态，请先点「发送验证码」")
+        code = (code or "").strip()
+        if not (code.isdigit() and 4 <= len(code) <= 8):
+            raise BaijiaError("验证码应为 4-8 位数字")
+        sms_state["code"] = code
+        login_state = {
+            "status": "verifying", "message": "正在提交验证码…",
+            "qr": False, "at": int(time.time()),
+        }
+
+    def _sms_login_worker(self) -> None:
+        """后台线程：一个浏览器会话内完成 填手机号→发码→等待→填验证码→登录。"""
+        global login_state
+        pw_ctx: Any = None
+        browser_ctx: Any = None
+        try:
+            from playwright.sync_api import sync_playwright
+
+            pw_ctx = sync_playwright().start()
+            browser_ctx = self._launch(pw_ctx)
+            page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
+            # 直接打登录页；domcontentloaded 避免 EDIT_URL 的 load 事件超时
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+
+            if "login" not in page.url and "passport" not in page.url and "theme/bjh" not in page.url:
+                _save_state({"logged_in": True})
+                login_state = {
+                    "status": "success", "message": "百家号已登录（无需验证码）",
+                    "qr": False, "at": int(time.time()),
+                }
+                return
+
+            # 落地页可能要先点「登录/注册百家号」才展开手机号表单
+            if not self._find_first(page, self.SMS_PHONE_SELECTORS):
+                entry = self._find_first(page, self.SMS_LOGIN_ENTRY_SELECTORS)
+                if entry:
+                    try:
+                        entry.click(timeout=4000)
+                        page.wait_for_timeout(2500)
+                    except Exception:
+                        pass
+
+            phone_input = self._find_first(page, self.SMS_PHONE_SELECTORS)
+            if not phone_input:
+                raise BaijiaError("没找到手机号输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+            phone_input.fill(sms_state["phone"])
+            page.wait_for_timeout(300)
+
+            send_btn = self._find_first(page, self.SMS_SEND_BTN_SELECTORS)
+            if not send_btn:
+                raise BaijiaError("没找到「发送验证码」按钮，跑诊断脚本把 DOM 发 AI")
+            send_btn.click(timeout=8000)
+            login_state = {
+                "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
+                "qr": False, "at": int(time.time()),
+            }
+
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                page.wait_for_timeout(1000)
+                if sms_state.get("code"):
+                    break
+                if login_state.get("status") == "cancelled":
+                    break
+            if not sms_state.get("code"):
+                login_state = {
+                    "status": "timeout", "message": "等验证码超时，请重新发送",
+                    "qr": False, "at": int(time.time()),
+                }
+                return
+
+            code_input = self._find_first(page, self.SMS_CODE_SELECTORS)
+            if not code_input:
+                raise BaijiaError("没找到验证码输入框，跑诊断脚本把 DOM 发 AI")
+            code_input.fill(sms_state["code"])
+            page.wait_for_timeout(300)
+
+            submit_btn = self._find_first(page, self.SMS_SUBMIT_BTN_SELECTORS)
+            if not submit_btn:
+                raise BaijiaError("没找到登录按钮，跑诊断脚本把 DOM 发 AI")
+            submit_btn.click(timeout=8000)
+
+            # 登录成功后离开登录页（进 builder 后台）
+            deadline2 = time.time() + 60
+            logged = False
+            while time.time() < deadline2:
+                page.wait_for_timeout(2000)
+                if "passport" not in page.url and "/login" not in page.url and "theme/bjh" not in page.url:
+                    logged = True
+                    break
+            if logged:
+                _save_state({"logged_in": True})
+                login_state = {
+                    "status": "success", "message": "登录成功，登录态已保存",
+                    "qr": False, "at": int(time.time()),
+                }
+            else:
+                login_state = {
+                    "status": "error", "message": "验证码提交后未跳转，可能验证码错误，请重试",
+                    "qr": False, "at": int(time.time()),
+                }
+        except Exception as exc:  # noqa: BLE001
+            login_state = {
+                "status": "error", "message": f"登录失败：{exc}",
+                "qr": False, "at": int(time.time()),
+            }
+        finally:
+            try:
+                if browser_ctx is not None:
+                    browser_ctx.close()
+            except Exception:
+                pass
+            try:
+                if pw_ctx is not None:
+                    pw_ctx.stop()
+            except Exception:
+                pass
 
     @staticmethod
     def _find_first(page: Any, selectors: list[str]) -> Any:
