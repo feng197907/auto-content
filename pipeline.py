@@ -284,6 +284,63 @@ def _fetch_rss_items(limit: int) -> list[dict[str, Any]]:
     return items
 
 
+def _fetch_official_items(limit: int) -> list[dict[str, Any]]:
+    """抓大模型厂商官方源（OpenAI / Google AI / DeepMind / Meta）+ Anthropic 新闻页。
+
+    为什么单开一条通路、不混进国内 RSS：
+    官方源标题是英文，用中文关键词表打分会全部判 0 分，混在一起永远选不上。
+    这里改用 hot_topics 的英文词边界匹配做 AI 相关性过滤，再统一打 prescore。
+
+    优先级：RSS 源（有摘要）> Anthropic（列表页只有标题）。
+    单源失败不影响其它源——Meta 新闻中心里非 AI 内容占比高，必须过滤。
+    """
+    items: list[dict[str, Any]] = []
+    for source in getattr(config, "OFFICIAL_SOURCES", []):
+        if len(items) >= limit:
+            break
+        try:
+            response = requests.get(
+                source["url"],
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                timeout=12,
+            )
+            response.raise_for_status()
+            feed = feedparser.parse(response.content)
+        except Exception as exc:  # noqa: BLE001 - 单源失败不影响其他源
+            print(f"  官方源 {source.get('name')} 抓取失败: {exc}")
+            continue
+
+        for entry in feed.entries[:6]:
+            if len(items) >= limit:
+                break
+            title = (entry.get("title") or "").strip()
+            if not title:
+                continue
+            summary = entry.get("summary") or entry.get("description") or ""
+            summary = _smart_summary(re.sub(r"<[^>]+>", " ", summary))
+            # Meta 新闻中心混着大量非 AI 消息（监管、财报、社会责任），必须过滤；
+            # 另外三家本身就是 AI 源，这里的过滤等于白名单，不会误杀。
+            if not hot_topics._english_ai_hit(f"{title} {summary}"):
+                continue
+            items.append({
+                "title": title,
+                "desc": summary,
+                "url": entry.get("link", ""),
+                "source": f"{source.get('name', '官方')}官方",
+                "hot": 0,
+                "prescore": getattr(config, "FIRSTHAND_PRESCORE", 4),
+            })
+
+    # Anthropic 放最后：它只有标题没有摘要，别把配额占满
+    if len(items) < limit and getattr(config, "USE_ANTHROPIC_HTML", True):
+        try:
+            items.extend(hot_topics.fetch_anthropic(limit - len(items)))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Anthropic 抓取失败: {exc}")
+
+    return items[:limit]
+
+
 def topic_blocked(item: dict[str, Any]) -> bool:
     """选题硬过滤：命中画像「不写的主题」就丢弃。
 
@@ -311,6 +368,20 @@ def _is_sidebiz(item: dict[str, Any]) -> bool:
     return any(w in text for w in config.SIDE_BIZ_KEYWORDS)
 
 
+def topic_entities(item: dict[str, Any]) -> set[str]:
+    """从标题里认出提到的公司/主体（按 config.TOPIC_ENTITY_ALIASES 的别名组）。
+
+    只查标题、不查摘要：摘要顺带提到的公司太多，查摘要会把去重做得过于激进，
+    把本来不同的事件也当成同一条砍掉。
+    """
+    text = str(item.get("title", "")).lower()
+    found: set[str] = set()
+    for group in getattr(config, "TOPIC_ENTITY_ALIASES", []):
+        if any(alias in text for alias in group):
+            found.add(group[0])
+    return found
+
+
 def build_daily_quotas(now: datetime | None = None) -> dict[str, int]:
     """算今天各栏目该生成几篇。daily_job 每天调用一次。
 
@@ -336,6 +407,8 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
     """
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # 早报用：已经出现过的公司/主体。同一主体只占一个名额（见 config.TOPIC_ENTITY_ALIASES）
+    used_entities: set[str] = set()
 
     def take(
         candidates: list[dict[str, Any]],
@@ -345,12 +418,20 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         skip_sidebiz: bool = False,
     ) -> int:
         """按配额取候选，返回实际新增数。带硬过滤、栏目标记与跨栏目去重。"""
+        nonlocal used_entities
         added = 0
         for candidate in candidates:
             if added >= quota:
                 break
             if topic_blocked(candidate):
                 continue
+            entities: set[str] = set()
+            if column == "ai_news":
+                entities = topic_entities(candidate)
+                # 同一主体今天已经占了名额就换一条。实测踩过：一条"黄仁勋回归英伟达"
+                # 会以中文知乎版 + 英文 HN 版同时进早报，5 条里 2 条讲同一件事。
+                if entities & used_entities:
+                    continue
             is_biz = _is_sidebiz(candidate)
             if sidebiz_only and not is_biz:
                 continue
@@ -360,6 +441,7 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
             if not key or key in seen:
                 continue
             seen.add(key)
+            used_entities |= entities
             row = dict(candidate)
             row["column"] = column
             items.append(row)
@@ -420,13 +502,55 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         )
         take(biz_pool, biz_quota, "ai_sidebiz", sidebiz_only=True)
 
-    # 3. AI 早报：热榜带摘要优先（公众号结果最多留 1 条防洗稿），再 RSS / 兜底
+    # 3. AI 早报：按报道方向留固定槽位，再让热榜/海外源补位
+    #    2026-11-24 调整：原来 5 条全靠热榜 collect()，国内技术媒体和官方源
+    #    实际上永远轮不到（热榜永远凑得满 5 条），"五个方向"等于只覆盖了一个。
+    #    现在固定给 GitHub 当日涨星 1 条、厂商官方源 1 条，剩下的才给热榜。
     news_quota = max(0, int(quotas.get("ai_news", 0)))
     if news_quota > 0:
+        added = 0
+
+        # 3a. 方向三：GitHub Trending 当日涨星 TOP3（默认只占 1 条）
+        if getattr(config, "USE_GITHUB_TRENDING_DAILY", True):
+            try:
+                recommended = {
+                    str(a.get("url", "")).rstrip("/")
+                    for a in load_queue()
+                    if a.get("column") == "github" and a.get("url")
+                }
+            except Exception:  # noqa: BLE001 - 去重失败不该挡住生成
+                recommended = set()
+            try:
+                tops = [
+                    x for x in hot_topics.fetch_github_trending_daily_top(
+                        getattr(config, "GITHUB_TRENDING_DAILY_TOP", 3)
+                    )
+                    if str(x.get("url", "")).rstrip("/") not in recommended
+                ]
+            except Exception as exc:  # noqa: BLE001
+                print(f"  GitHub 当日涨星抓取失败：{exc}")
+                tops = []
+            slot = min(getattr(config, "GITHUB_TRENDING_DAILY_SLOTS", 1), news_quota)
+            added += take(tops, slot, "ai_news", skip_sidebiz=True)
+
+        # 3b. 方向一/二：厂商官方源（OpenAI/Google/DeepMind/Meta/Anthropic）占 1 条
+        if getattr(config, "USE_OFFICIAL_SOURCES", True) and added < news_quota:
+            try:
+                official = _fetch_official_items(max(3, news_quota))
+            except Exception as exc:  # noqa: BLE001
+                print(f"  官方源选题失败：{exc}")
+                official = []
+            added += take(official, 1, "ai_news", skip_sidebiz=True)
+
+        # 3c. 方向四/五：热榜 + 海外（HN / Product Hunt / 知乎 / V2EX）
+        #     公众号搜索最多留 1 条——那是同行写过的稿，多了就是洗稿
         hot = hot_topics.collect(max(news_quota * 2, 8), require_desc=True)
         wechat_rows = [x for x in hot if str(x.get("source", "")).startswith("公众号")]
         other_rows = [x for x in hot if not str(x.get("source", "")).startswith("公众号")]
-        added = take(other_rows + wechat_rows[:1], news_quota, "ai_news", skip_sidebiz=True)
+        added += take(
+            other_rows + wechat_rows[:1], news_quota - added, "ai_news", skip_sidebiz=True
+        )
+        # 3d. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）补位
         if added < news_quota:
             added += take(
                 _fetch_rss_items(news_quota), news_quota - added, "ai_news", skip_sidebiz=True
@@ -456,6 +580,7 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
     """
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
+    used_entities: set[str] = set()  # 同一主体只占一个名额，避免一条新闻两个语言版本都进
 
     # 0. GitHub 深度专栏：到期才占 1 篇（默认每 3 天），放队列最前面。
     #    跟第 6 步"GitHub 当热点线索"是两回事，互不冲突（专栏走专用提示词）。
@@ -488,6 +613,7 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
 
     def take(candidates: list[dict[str, Any]], quota: int) -> None:
         """按配额取候选，用 url（退回 title）去重，不超过总上限 limit。"""
+        nonlocal used_entities
         added = 0
         for candidate in candidates:
             if added >= quota or len(items) >= limit:
@@ -495,14 +621,47 @@ def fetch_topic_items(limit: int) -> list[dict[str, Any]]:
             # 账号定位的硬过滤——所有来源都过这一关（RSS 以前是漏网之鱼）
             if topic_blocked(candidate):
                 continue
+            entities = topic_entities(candidate)
+            if entities & used_entities:
+                continue
             key = (candidate.get("url") or candidate.get("title") or "").strip()
             if not key or key in seen:
                 continue
             seen.add(key)
+            used_entities |= entities
             items.append(candidate)
             added += 1
 
-    # 1. 全网热榜技术话题：约 50%，至少 2 条
+    # 1. 方向三 + 方向一：GitHub 当日涨星、厂商官方源各占 1 条
+    #    与定时任务（build_topics）保持一致，否则手动生成出来的稿全是热榜，
+    #    跟自动跑的不是一个调性。
+    if getattr(config, "USE_GITHUB_TRENDING_DAILY", True):
+        try:
+            written = {
+                str(a.get("url", "")).rstrip("/")
+                for a in load_queue()
+                if a.get("url")
+            }
+        except Exception:  # noqa: BLE001
+            written = set()
+        try:
+            tops = [
+                x for x in hot_topics.fetch_github_trending_daily_top(
+                    getattr(config, "GITHUB_TRENDING_DAILY_TOP", 3)
+                )
+                if str(x.get("url", "")).rstrip("/") not in written
+            ]
+            take(tops[:1], 1)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  GitHub 当日涨星抓取失败：{exc}")
+
+    if getattr(config, "USE_OFFICIAL_SOURCES", True):
+        try:
+            take(_fetch_official_items(3), 1)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  官方源选题失败：{exc}")
+
+    # 2. 全网热榜技术话题：约 50%，至少 2 条
     #    只取带真实摘要的条目（抖音/快手只有标题，写出来必然空泛，故不用）
     hot_quota = max(2, round(limit * 0.5))
     hot_candidates = hot_topics.collect(max(limit * 2, 6), require_desc=True)

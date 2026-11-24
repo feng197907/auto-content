@@ -1,21 +1,24 @@
-"""热榜选题抓取：抓全网多平台实时热榜 + 国内技术社区热榜，带真实摘要和原文链接。
+"""热榜选题抓取：抓全网多平台实时热榜 + 国内技术社区热榜 + 海外一手源。
 
-数据源（2026-11-20 扩到八路，开关都在 config.py）：
-    知乎热榜 / 百度热搜 / 微博热搜 / 公众号搜索（搜狗）/ B站热搜 /
-    抖音热榜 / 快手热榜 / 头条热榜，另加掘金、GitHub、六个技术媒体 RSS。
+数据源（2026-11-24 报道方向调整后，开关都在 config.py）：
+    国内热榜：知乎 / 百度 / 微博 / 公众号搜索（搜狗）/ B站 / 抖音 / 快手 / 头条
+    国内技术：掘金、六个技术媒体 RSS（pipeline 里）、GitHub Trending
+    海外一手：Hacker News 首页 / Product Hunt 当日榜 / Anthropic 官方新闻页
+    厂商官方：OpenAI / Google AI / DeepMind / Meta（走 pipeline._fetch_official_items）
+    暂不可用：V2EX（服务器直连不通，代码保留、默认关闭）
 
 设计思路（重要）：
-    全网热榜多是大众话题，与"AI/数码科技"垂直领域未必相关。
+    全网热榜多是大众话题，与"AI 行业信息"垂直领域未必相关。
     所以不是直接拿热榜写稿，而是：
       1. 抓各平台实时热榜（带热度值、真实摘要、原文链接）
-      2. 抓掘金技术热榜（国内开发者社区实时榜，纯技术内容）
-      3. 用领域关键词打分，筛出相关的
-      4. 相关的优先用并标注热度，不够时用备用词保底
+      2. 抓海内外一手源（官方源、HN、Product Hunt、GitHub 当日涨星）
+      3. 用领域关键词打分（英文源用单词边界匹配，避免 "ai" 命中 "said"）
+      4. 相关的按来源轮转取样，保证五个报道方向都有覆盖
 
     摘要有无必须分清，它决定能写出多长的稿：
       有摘要 —— 知乎（excerpt_area 整段问题描述，质量最高）、百度、微博（note）、
-                公众号搜索（搜狗返回的摘要）
-      只有标题 —— 抖音、快手、B站、头条（desc 留空，下游只写"是什么 + 怎么看"）
+                公众号搜索（搜狗返回的摘要）、Hacker News（原文页 og:description）
+      只有标题 —— 抖音、快手、B站、头条、Anthropic 新闻列表、Product Hunt（一句话 tagline）
 
     每条条目都带 desc（真实新闻摘要）和 url（原文链接），
     供下游"基于真实素材写作"使用，避免 AI 凭空编造。
@@ -53,6 +56,12 @@ ZHIHU_URL = "https://www.zhihu.com/api/v3/feed/topstory/hot-list-web"
 KUAISHOU_URL = "https://www.kuaishou.com/graphql"
 BILIBILI_URL = "https://api.bilibili.com/x/web-interface/search/square"
 SOGOU_WEIXIN_URL = "https://weixin.sogou.com/weixin"
+# 2026-11-24 新增三源：HN 走 Algolia（比官方 Firebase 快 8 倍，且直接带 points），
+# Product Hunt 走官方 Atom feed，Anthropic 无 RSS 只能解析新闻页。
+HN_ALGOLIA_URL = "https://hn.algolia.com/api/v1/search"
+PRODUCTHUNT_FEED = "https://www.producthunt.com/feed"
+ANTHROPIC_NEWS_URL = "https://www.anthropic.com/news"
+V2EX_HOT_URL = "https://www.v2ex.com/api/topics/hot.json"
 
 # 浏览器 UA：微博/抖音/知乎/快手都做了反爬，默认的 python-requests UA 会被挡
 BROWSER_HEADERS = {
@@ -525,6 +534,325 @@ def fetch_github_trending(
     return result
 
 
+# ---------------------------------------------------------------------------
+# 2026-11-24 新增：Hacker News / Product Hunt / Anthropic 官方 / V2EX
+#
+# 报道方向调整后要覆盖"海外动态"与"厂商官方更新"。这几个源的共同问题是
+# 没有中文摘要、甚至完全没有摘要，所以每个都要过一道 AI 相关性过滤 + 摘要补全：
+#   · HN        —— 只给 title/points，用原文页 og:description 补一句
+#   · PH        —— feed 自带一句话 tagline，够用但薄（走 thin 档写作）
+#   · Anthropic —— 没 RSS，只能从新闻页抓 /news/ 链接
+#   · V2EX      —— 服务器直连不通，代码保留、默认关闭
+# ---------------------------------------------------------------------------
+
+def _english_ai_hit(text: str) -> bool:
+    """英文标题/简介是否属于 AI 领域。
+
+    不复用 relevance_score 的"子串包含"匹配：英文标题转小写后，
+    "ai" 会命中 "said""detail""main""captain"…… 误判率极高。
+    这里按单词边界匹配（前后不能是字母数字），"ai-driven" 仍能命中。
+    """
+    low = (text or "").lower()
+    if not low:
+        return False
+    for keyword in getattr(config, "AI_KEYWORDS_EN", []):
+        pattern = rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])"
+        if re.search(pattern, low):
+            return True
+    return False
+
+
+def _github_ai_hit(text: str) -> bool:
+    """仓库名+简介是否属于 AI 项目，规则同上（单词边界匹配）。"""
+    low = (text or "").lower()
+    if not low:
+        return False
+    for keyword in getattr(config, "GITHUB_TRENDING_AI_KEYWORDS", []):
+        pattern = rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])"
+        if re.search(pattern, low):
+            return True
+    return False
+
+
+def _meta_description(url: str, timeout: int = 5) -> str:
+    """取文章页的 og:description / meta description，给没有摘要的源补素材。
+
+    只在页面确实给了 description 时才有结果；取不到就返回空，
+    下游按"只有标题"处理，不会据此编造。
+    """
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        response = requests.get(
+            url, headers=BROWSER_HEADERS, timeout=timeout, allow_redirects=True
+        )
+        if response.status_code != 200:
+            return ""
+        html = response.text[:400000]
+    except requests.RequestException:
+        return ""
+
+    patterns = (
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+        r'<meta[^>]+content=["\'](.*?)["\'][^>]+(?:property=["\']og:description|name=["\']description)["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, re.S | re.I)
+        if not match:
+            continue
+        text = unescape(re.sub(r"<[^>]+>", " ", match.group(1)))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) >= 20:
+            return _clean_text(text, 400)
+    return ""
+
+
+def fetch_hackernews(limit: int = 10, timeout: int = 12) -> list[dict[str, Any]]:
+    """抓 Hacker News 首页，只留 AI 相关条目。
+
+    用 Algolia 的 front_page 接口：实测 0.8s 返回 30 条，且直接给
+    points / num_comments / story_text；官方 Firebase 要 6.8s 且只有 id 列表。
+    多数条目没有正文，靠 _meta_description 取原文页 description 补一句；
+    补不到就只带"首页分数 + 讨论数"这条真实元信息，不编内容。
+    """
+    try:
+        response = requests.get(
+            HN_ALGOLIA_URL,
+            params={"tags": "front_page", "hitsPerPage": 60},
+            headers=BROWSER_HEADERS,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        hits = response.json().get("hits") or []
+    except (requests.RequestException, ValueError) as exc:
+        print(f"  Hacker News 抓取失败: {exc}")
+        return []
+
+    min_points = getattr(config, "HN_MIN_POINTS", 80)
+    picked: list[tuple[int, dict[str, Any], str]] = []
+    for hit in hits:
+        title = _clean_text(hit.get("title") or "", 200)
+        if not title:
+            continue
+        story_text = hit.get("story_text") or ""
+        if not _english_ai_hit(f"{title} {story_text}"):
+            continue
+        points = _to_hot(hit.get("points"))
+        if points < min_points:
+            continue
+        picked.append((points, hit, title))
+    picked.sort(key=lambda row: row[0], reverse=True)
+
+    # 补摘要要发一次外部请求，只给前 6 条补，避免选题阶段拖太久
+    enrich_budget = 6
+    result: list[dict[str, Any]] = []
+    for points, hit, title in picked[: max(limit, 1)]:
+        url = (hit.get("url") or "").strip()
+        object_id = str(hit.get("objectID") or "")
+        if not url and object_id:
+            url = f"https://news.ycombinator.com/item?id={object_id}"
+        comments = _to_hot(hit.get("num_comments"))
+
+        desc = _clean_text(hit.get("story_text") or "")
+        if not desc and enrich_budget > 0:
+            desc = _meta_description(url)
+            enrich_budget -= 1
+        # 无论有没有正文，都把"首页多少分、多少条讨论"作为真实热度带上：
+        # 这是编辑判断的依据，也是这里唯一能确定的事实。
+        heat = f"Hacker News 首页 {points} 分、{comments} 条讨论。"
+        desc = f"{desc}（{heat}）" if desc else heat
+
+        result.append({
+            "title": title,
+            "desc": desc,
+            "url": url,
+            "hot": points,
+            "source": "Hacker News",
+            # prescore=4：一手源优先于二手热榜（热榜命中关键词是 3 分），
+            # 否则同分时会被"万"级热度反超，HN 永远排在百度热搜后面
+            "prescore": getattr(config, "FIRSTHAND_PRESCORE", 4),
+            "points": points,
+            "comments": comments,
+        })
+    return result
+
+
+def fetch_producthunt(limit: int = 10, timeout: int = 10) -> list[dict[str, Any]]:
+    """抓 Product Hunt 当日榜（官方 Atom feed），只留 AI 相关条目。
+
+    实测 1.0s 返回 50 条，顺序即当日热度序（feed 里没有票数字段）。
+    每条只有一句 tagline（约 60 字），属于薄素材——
+    下游按 thin 档写作，靠"这是什么产品、解决什么问题"展开，不堆细节。
+    """
+    try:
+        import feedparser
+    except ImportError:
+        print("  Product Hunt 跳过：没装 feedparser")
+        return []
+
+    try:
+        response = requests.get(PRODUCTHUNT_FEED, headers=BROWSER_HEADERS, timeout=timeout)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
+    except (requests.RequestException, ValueError) as exc:
+        print(f"  Product Hunt 抓取失败: {exc}")
+        return []
+
+    result: list[dict[str, Any]] = []
+    for index, entry in enumerate(feed.entries):
+        if len(result) >= limit:
+            break
+        title = _clean_text(entry.get("title") or "", 120)
+        if not title:
+            continue
+        summary = re.sub(r"<[^>]+>", " ", entry.get("summary") or "")
+        summary = re.sub(r"\s+", " ", unescape(summary)).strip()
+        # feed 的摘要尾巴固定挂着 "Discussion | Link"，是导航文字不是内容
+        summary = re.sub(r"\s*Discussion\s*\|\s*Link\s*$", "", summary).strip()
+        if not _english_ai_hit(f"{title} {summary}"):
+            continue
+        result.append({
+            "title": title,
+            "desc": summary,
+            "url": entry.get("link") or "",
+            "hot": max(0, 60 - index),  # 没有票数，用榜单位置当热度
+            "source": "Product Hunt",
+            "prescore": getattr(config, "FIRSTHAND_PRESCORE", 4),
+        })
+    return result
+
+
+_ANTHROPIC_CACHE: dict[str, Any] = {"at": 0.0, "items": []}
+_ANTHROPIC_TTL = 1800  # 30 分钟：新闻页 340KB，一次选题流程会多次调用 collect()
+
+
+def fetch_anthropic(limit: int = 8, timeout: int = 12) -> list[dict[str, Any]]:
+    """抓 Anthropic 新闻页（官方没有 RSS，三种常见地址实测全是 404）。
+
+    实测能稳定解析出 20+ 条 /news/ 链接。标题优先取链接文字，
+    取不到就把 slug 转成可读标题——宁可标题朴素，也不编一个不存在的标题。
+    失败一律返回空，不影响其它源。
+    """
+    now = time.time()
+    if now - _ANTHROPIC_CACHE["at"] < _ANTHROPIC_TTL and _ANTHROPIC_CACHE["items"]:
+        return list(_ANTHROPIC_CACHE["items"])[:limit]
+
+    try:
+        response = requests.get(ANTHROPIC_NEWS_URL, headers=BROWSER_HEADERS, timeout=timeout)
+        response.raise_for_status()
+        html = response.text
+    except requests.RequestException as exc:
+        print(f"  Anthropic 抓取失败: {exc}")
+        return []
+
+    # 分类页不是文章，混进来会写成"Anthropic 有个公告栏目"这种废话
+    skip_slugs = {
+        "/news/announcements", "/news/features", "/news/research",
+        "/news/policy", "/news/product", "/news/societal-impacts",
+        "/news/interpretability", "/news/alignment",
+        # 导航/分类入口：实测"Partnerships"这类会被当成一条新闻抓进来
+        "/news/partnerships", "/news/events", "/news/teams", "/news/careers",
+    }
+    # 公司事务类公告不算"大模型产品更新"，写出来是财经新闻不是技术资讯。
+    # 实测 2026-11-24 当天首页被 IPO 系列占满，不过滤的话整栏都是"上市路演"。
+    corporate_terms = (
+        "initial public offering", "ipo", "roadshow", "public benefit fund",
+        "investor", "valuation", "lawsuit", "settlement", "privacy policy",
+        "terms of service", "hiring", "careers", "bug bounty", "security",
+        "prices", "closing of", "shares",
+    )
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in re.finditer(r'href="(/news/[a-z0-9][a-z0-9\-]*)"[^>]*>(.*?)</a>', html, re.S):
+        slug, inner = match.group(1), match.group(2)
+        if slug in skip_slugs or slug in seen:
+            continue
+        text = unescape(re.sub(r"<[^>]+>", " ", inner))
+        text = re.sub(r"\s+", " ", text).strip()
+        # 取不到链接文字就丢弃，不用 slug 拼一个假标题：
+        # 标题是下游写作的唯一事实来源，拼出来的标题会让 AI 顺着瞎猜内容。
+        if len(text) < 8 or len(text) > 200:
+            continue
+        if any(term in text.lower() for term in corporate_terms):
+            continue
+        seen.add(slug)
+        result.append({
+            "title": _clean_text(text, 160),
+            "desc": "",  # 列表页没有摘要，下游按"只有标题"处理
+            "url": f"https://www.anthropic.com{slug}",
+            "hot": max(0, 50 - len(result)),
+            "source": "Anthropic",
+            "prescore": getattr(config, "FIRSTHAND_PRESCORE", 4),
+        })
+        if len(result) >= max(limit, 1):
+            break
+
+    _ANTHROPIC_CACHE.update({"at": now, "items": result})
+    return result
+
+
+def fetch_v2ex(limit: int = 10, timeout: int = 10) -> list[dict[str, Any]]:
+    """抓 V2EX 热帖。服务器直连不通（见 config.USE_V2EX_TOPICS 注释），默认不启用。
+
+    保留实现的原因：换网络环境或加代理就能直接用，不用重写。
+    在当前服务器上它必然抛连接异常并返回空，属预期行为，不是 bug。
+    """
+    try:
+        response = requests.get(V2EX_HOT_URL, headers=BROWSER_HEADERS, timeout=timeout)
+        response.raise_for_status()
+        rows = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        print(f"  V2EX 抓取失败（服务器直连不通，属已知情况）: {exc}")
+        return []
+
+    result: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        title = _clean_text(row.get("title") or "", 200)
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "desc": _clean_text(row.get("content") or "", 400),
+            "url": row.get("url") or "",
+            "hot": 0,  # 该接口不给热度值
+            "source": "V2EX",
+        })
+    return result
+
+
+def fetch_github_trending_daily_top(
+    limit: int = 3, timeout: int = 25
+) -> list[dict[str, Any]]:
+    """GitHub Trending「当日涨星」里最靠前的 AI 项目（默认 TOP3）。
+
+    与 fetch_github(column=True) 的区别：
+      · 那个是"每 3 天 1 篇的深度专栏"，门槛 1000 星、按周涨星选，吃透一个项目；
+      · 这个是"每日热点资讯"，按当日涨星选，进早报占 1 条，只讲"今天这个项目涨疯了"。
+    since=daily 时 Trending 页给的是 "N stars today"，正是"当日涨星"。
+    """
+    rows = fetch_github_trending(limit=40, since="daily", timeout=timeout)
+    if not rows:
+        return []
+
+    picked: list[dict[str, Any]] = []
+    for row in rows:
+        repo = str(row.get("repo") or "")
+        text = f"{repo} {row.get('desc') or ''}"
+        if not _github_ai_hit(text):
+            continue
+        item = dict(row)
+        item["source"] = "GitHub当日涨星"
+        item["prescore"] = getattr(config, "FIRSTHAND_PRESCORE", 4)
+        picked.append(item)
+        if len(picked) >= max(limit, 1):
+            break
+    return picked
+
+
 def _github_repo_detail(repo: str, timeout: int = 8) -> dict[str, Any]:
     """取单个仓库的富素材（许可/topics/forks/更新时间），失败返回空字典。"""
     try:
@@ -792,6 +1120,20 @@ def relevance_score(title: str) -> int:
     return score
 
 
+def item_score(item: dict[str, Any]) -> int:
+    """条目的领域分。
+
+    海外源（HN / Product Hunt / Anthropic / GitHub Trending）的标题是英文，
+    过不了中文关键词表，会在 collect() 里被判 0 分直接丢掉。
+    这些抓取器自己已经做过一轮严格的单词边界过滤，并打了 prescore，
+    这里优先信任它；没有 prescore 的条目仍按中文关键词表打分。
+    """
+    preset = item.get("prescore")
+    if isinstance(preset, int) and preset > 0:
+        return preset
+    return relevance_score(str(item.get("title", "")))
+
+
 def enabled_hot_sources() -> list[tuple[str, Any]]:
     """返回当前启用的热榜源，顺序即抓取与优先级顺序。
 
@@ -800,6 +1142,17 @@ def enabled_hot_sources() -> list[tuple[str, Any]]:
     带摘要的先用，标题类的只在素材不够时兜底。
     """
     sources: list[tuple[str, Any]] = [("知乎热榜", fetch_zhihu), ("百度热搜", fetch_baidu)]
+    # 2026-11-24 新增：海外与官方源插在"国内有摘要的源"之后、"只有标题的源"之前。
+    # 顺序在这里不是决定性的（NEWS_SOURCE_DIVERSIFY 打开后会按来源轮转），
+    # 保留顺序是为了让不轮转的老路径也有合理优先级。
+    if getattr(config, "USE_HN_TOPICS", False):
+        sources.append(("Hacker News", fetch_hackernews))
+    if getattr(config, "USE_PRODUCTHUNT_TOPICS", False):
+        sources.append(("Product Hunt", fetch_producthunt))
+    if getattr(config, "USE_ANTHROPIC_HTML", False):
+        sources.append(("Anthropic", fetch_anthropic))
+    if getattr(config, "USE_V2EX_TOPICS", False):
+        sources.append(("V2EX", fetch_v2ex))
     if getattr(config, "USE_WEIBO_TOPICS", True):
         sources.append(("微博热搜", fetch_weibo))
     if getattr(config, "USE_WECHAT_SEARCH", True):
@@ -812,6 +1165,49 @@ def enabled_hot_sources() -> list[tuple[str, Any]]:
         sources.append(("快手热榜", fetch_kuaishou))
     sources.append(("头条热榜", fetch_toutiao))
     return sources
+
+
+def _diversify_by_source(scored: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """按来源轮转取样：每个来源先出自己最高分的一条，再出第二条……
+
+    为什么需要它：知乎热榜的 hot 是"万"级、HN 的 points 是"千"级、RSS 是 0。
+    按 (相关分, 热度) 排，海外源和官方源永远排在热榜后面，
+    五个报道方向里"HN / Product Hunt / GitHub 当日涨星"等于白接。
+    轮转后早报 5 条会自然覆盖到多个来源，而不是被单一热榜占满。
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for item in scored:  # scored 已按 (分, 热度) 降序，桶内天然有序
+        # 公众号搜索的 source 是"公众号·某某号"，一个号一个名字。
+        # 不归一化的话，10 条里能有 9 条是不同公众号，把 HN/Product Hunt 全挤掉。
+        key = str(item.get("source", ""))
+        if key.startswith("公众号"):
+            key = "公众号搜索"
+        buckets.setdefault(key, []).append(item)
+
+    order = sorted(
+        buckets,
+        key=lambda name: (
+            buckets[name][0].get("score", 0),
+            buckets[name][0].get("hot", 0),
+        ),
+        reverse=True,
+    )
+
+    result: list[dict[str, Any]] = []
+    round_index = 0
+    while len(result) < limit:
+        added = False
+        for name in order:
+            bucket = buckets[name]
+            if round_index < len(bucket):
+                result.append(bucket[round_index])
+                added = True
+                if len(result) >= limit:
+                    break
+        if not added:
+            break
+        round_index += 1
+    return result
 
 
 def collect(limit: int, require_desc: bool = True) -> list[dict[str, Any]]:
@@ -846,12 +1242,16 @@ def collect(limit: int, require_desc: bool = True) -> list[dict[str, Any]]:
     for item in unique:
         if require_desc and not (item.get("desc") or "").strip():
             continue
-        score = relevance_score(item["title"])
+        score = item_score(item)
         if score > 0:
             item["score"] = score
             scored.append(item)
 
     scored.sort(key=lambda x: (x["score"], x["hot"]), reverse=True)
+    # 默认按分排就够；但报道方向扩到五个之后，纯按分排会让热榜吃掉所有位置，
+    # 海外源/官方源的 hot 天生打不过"万"级热度，所以按来源轮转保证覆盖。
+    if getattr(config, "NEWS_SOURCE_DIVERSIFY", False) and len(scored) > limit:
+        return _diversify_by_source(scored, limit)
     return scored[:limit]
 
 

@@ -350,9 +350,25 @@ USE_HOT_TOPICS = True
 KEYWORDS_STRONG = [
     "AI", "人工智能", "大模型", "ChatGPT", "GPT", "OpenAI", "DeepSeek",
     "豆包", "文心", "通义", "智谱", "Sora", "芯片", "显卡", "英伟达",
-    "手机", "华为", "小米", "苹果手机", "iPhone", "发布会", "鸿蒙", "机器人",
+    # 2026-11-24：手机/OS 厂商名从强相关降为弱相关（见 KEYWORDS_WEAK）。
+    # 报道方向已收窄到"AI 行业信息"，降级前实测会选出"出货暴跌40% 非洲成最惨手机市场"
+    # 这种纯数码消费新闻，占掉了早报名额。降级而非删除：华为/小米的 AI 动态仍能命中。
+    "发布会", "机器人",
     # 2026-11-20 补：热榜里出现但原词表漏掉的国产模型/产品名（知乎榜实测漏了"混元"）
     "混元", "千问", "元宝", "Claude", "Gemini", "Llama", "智能体", "Agent",
+    # ---- 2026-11-24 报道方向调整：五个方向里的"大模型与 Agent 产品更新" ----
+    # 海外四家：产品名和公司名都要列，热榜标题常只写产品不写公司（如"Gemini 3 发布"）
+    "Anthropic", "Google", "Meta", "Mistral", "xAI", "Grok",
+    "Copilot", "Cursor", "Perplexity", "Midjourney", "Runway", "Suno",
+    "Gemma", "Qwen", "Phi", "Whisper", "Veo", "Imagen", "Nano Banana",
+    # 国产六小虎（智谱/月之暗面/百川/零一万物/阶跃/MiniMax），
+    # 以及它们各自最常被标题直接引用的产品名
+    "月之暗面", "Kimi", "百川", "零一万物", "阶跃", "StepFun", "MiniMax",
+    "GLM", "海螺", "万知", "Yi-", "abab",
+    # Agent / 模型能力类：决定是不是"产品更新"，比"科技"精准得多
+    # 注意："Agent""智能体"已在上面列过，这里不重复——重复会让同一篇稿被加两次分
+    "MCP", "多模态", "推理模型", "开源模型", "工作流",
+    "RAG", "fine-tune", "微调", "上下文", "token",
 ]
 KEYWORDS_WEAK = [
     "科技", "数码", "互联网", "软件", "系统", "更新", "智能", "算法",
@@ -360,8 +376,23 @@ KEYWORDS_WEAK = [
     "相机", "拍照", "性能", "应用", "平台", "开源", "代码",
     # 账号定位是"AI + 副业"，社交平台热榜里的副业类话题也算相关
     "副业", "搞钱", "兼职", "自由职业", "远程办公",
+    # 2026-11-24 从强相关降级：手机/OS 消费类资讯只在"顺带提到 AI"时才算相关，
+    # 单靠"手机"两个字上不了早报
+    "手机", "华为", "小米", "苹果手机", "iPhone", "鸿蒙",
     # 2026-11-23 补：副业变现方向，抓"AI副业 / 被动收入"主题
     "AI副业", "被动收入",
+    # ---- 2026-11-24 报道方向调整：方向二"AI 办公、内容创作、开发者工具新功能" ----
+    # 这三个方向的具体品类词放弱相关：命中就算相关，但优先级低于模型/厂商本身，
+    # 避免"某办公软件更新了个插件"这类低价值资讯挤掉真正的大模型动态。
+    # ① AI 办公
+    "办公", "文档", "表格", "PPT", "幻灯片", "会议", "纪要", "协作",
+    "Notion", "飞书", "钉钉", "WPS", "Office", "Excel", "邮箱",
+    # ② 内容创作
+    "创作", "剪辑", "配音", "字幕", "封面", "设计", "配图", "生图",
+    "Canva", "Figma", "即梦", "可灵", "剪映", "Midjourney", "音色",
+    # ③ 开发者工具
+    "IDE", "编程", "开发", "SDK", "API", "插件", "终端", "部署",
+    "GitHub", "仓库", "提效", "重构", "测试", "数据库",
 ]
 
 # 不写的主题（命中即丢弃，优先级高于上面的相关词）。
@@ -391,6 +422,136 @@ TOPIC_SOURCES: list[dict[str, str]] = [
     {"name": "博客园", "url": "https://www.cnblogs.com/rss"},
     {"name": "量子位", "url": "https://www.qbitai.com/feed"},
 ]
+
+# ---- 大模型厂商官方源（2026-11-24 新增）----
+# 为什么要单列一组：报道方向第一条就是"大模型与 Agent 产品更新"，
+# 靠国内媒体转述容易拿到二手解读、版本号还常写错。官方源是版本号和日期的唯一可信处。
+# 组内各类在 pipeline._fetch_rss_items 里按"国内媒体优先、官方源补位"两段轮转，
+# 不会因为英文源太多把国内技术媒体的位置挤掉。
+#
+# 2026-11-24 在服务器（101.201.48.64）逐条实测：
+#   OpenAI  news/rss.xml                      200  1.6s  ✅
+#   Google  blog.google/.../technology/ai/rss 200  1.4s  ✅（旧地址会 301，直接写最终地址）
+#   DeepMind blog/rss.xml                     200  1.3s  ✅
+#   Meta    about.fb.com/news/feed/           200        ✅（ai.meta.com 被重置，改用新闻中心）
+#   Anthropic 无 RSS（/rss.xml 等三种都 404）   → 走 news 页 HTML 解析，见 fetch_anthropic
+# 国产六小虎（智谱/月之暗面/百川/零一万物/阶跃/MiniMax）无稳定 RSS，
+# 靠 KEYWORDS_STRONG 里的产品名词命中热榜、HN 与国内媒体来覆盖。
+USE_OFFICIAL_SOURCES = os.getenv("USE_OFFICIAL_SOURCES", "1") == "1"
+OFFICIAL_SOURCES: list[dict[str, str]] = [
+    {"name": "OpenAI", "url": "https://openai.com/news/rss.xml"},
+    {
+        "name": "Google AI",
+        "url": "https://blog.google/innovation-and-ai/technology/ai/rss/",
+    },
+    {"name": "DeepMind", "url": "https://deepmind.google/blog/rss.xml"},
+    {"name": "Meta", "url": "https://about.fb.com/news/feed/"},
+]
+# Anthropic 没有 RSS，单独抓新闻页链接（实测能解析出 20+ 条）
+USE_ANTHROPIC_HTML = os.getenv("USE_ANTHROPIC_HTML", "1") == "1"
+
+# ---- Hacker News 首页（2026-11-24 新增）----
+# 用 Algolia 的 front_page 接口（实测 0.8s，比官方 Firebase 的 6.8s 快一个数量级，
+# 且直接给 points / num_comments）。HN 条目多数没有正文摘要，
+# 所以抓下来后会用 og:description 补一次——不补的话只能写"标题级"的稿。
+USE_HN_TOPICS = os.getenv("USE_HN_TOPICS", "1") == "1"
+HN_MIN_POINTS = max(0, int(os.getenv("HN_MIN_POINTS", "80")))  # 分数太低的讨论不足以为据
+
+# ---- Product Hunt 当日榜（2026-11-24 新增）----
+# 官方 Atom feed，实测 1.0s、50 条，顺序即当日热度序。
+# 注意：feed 里只有一句话 tagline（约 60 字），属于"薄素材"，
+# 下游会按 thin 档写作（1000-1300 字，靠机制与判断展开，不靠细节）。
+USE_PRODUCTHUNT_TOPICS = os.getenv("USE_PRODUCTHUNT_TOPICS", "1") == "1"
+
+# ---- V2EX 热帖（2026-11-24 新增，默认关闭）----
+# 实测结论：服务器直连不通，且没有可用替代路径——
+#   www.v2ex.com/api/topics/hot.json   超时
+#   v2ex.com/index.xml                 TCP 直接连不上（62ms 就断）
+#   cn.v2ex.com                        超时
+#   rsshub.app/v2ex/topics/hot         超时
+# 代码保留（含解析逻辑），等有代理或换机房再开：.env 写 USE_V2EX_TOPICS=1。
+# 在你那台机器上它必然返回空，所以默认关，免得每天刷一条失败日志。
+USE_V2EX_TOPICS = os.getenv("USE_V2EX_TOPICS", "0") == "1"
+
+# ---- 海外源英文关键词（HN / Product Hunt 用）----
+# 为什么不复用 KEYWORDS_STRONG：那是一套"子串包含"匹配，中文标题里用没问题，
+# 但英文标题一律小写后就炸了——"ai" 会命中 "said""detail""main"。
+# 所以英文源单独用一组词，并且按单词边界（\b）匹配。
+AI_KEYWORDS_EN = [
+    "ai", "llm", "llms", "gpt", "openai", "anthropic", "claude", "gemini",
+    "deepmind", "llama", "mistral", "qwen", "glm", "kimi", "deepseek",
+    "agent", "agents", "agentic", "mcp", "rag", "embedding", "embeddings",
+    "transformer", "diffusion", "multimodal", "inference", "fine-tuning",
+    "chatbot", "copilot", "cursor", "prompt", "prompts", "tokenizer",
+    "vision model", "text-to-image", "text-to-video", "speech-to-text",
+    "machine learning", "neural", "gpu", "nvidia", "tpu", "hugging face",
+    "langchain", "vector database", "open-source model", "local model",
+]
+
+# ---- GitHub Trending 当日涨星 TOP（2026-11-24 新增）----
+# 方向三要的是"当日涨星 TOP3 的 AI 项目"，与"每 3 天 1 篇的深度专栏"是两件事：
+# 专栏 = 吃透一个项目（长稿、专用提示词）；这里 = 每日热点资讯（占早报 1 条）。
+# Trending 的 since=daily 分支自带 "N stars today" 字段，正是"当日涨星"。
+USE_GITHUB_TRENDING_DAILY = os.getenv("USE_GITHUB_TRENDING_DAILY", "1") == "1"
+GITHUB_TRENDING_DAILY_TOP = max(1, int(os.getenv("GITHUB_TRENDING_DAILY_TOP", "3")))
+# 每天早报里给 Trending 留几条位置。默认 1——保持"一条资讯一个焦点"，
+# 想要一次把 TOP3 都写成三条，把它设成 3 即可。
+GITHUB_TRENDING_DAILY_SLOTS = max(1, int(os.getenv("GITHUB_TRENDING_DAILY_SLOTS", "1")))
+# 判断一个仓库是不是"AI 项目"：查仓库名 + 官方简介（英文为主，按单词边界匹配）
+GITHUB_TRENDING_AI_KEYWORDS = [
+    "ai", "llm", "agent", "agents", "gpt", "claude", "gemini", "llama",
+    "rag", "mcp", "diffusion", "transformer", "chatbot", "prompt",
+    "embedding", "multimodal", "vision", "speech", "tts", "whisper",
+    "copilot", "openai", "anthropic", "qwen", "deepseek", "glm", "kimi",
+    "semantic", "neural", "nlp", "inference", "model", "skill", "skills",
+]
+
+# ---- 一手源优先级（2026-11-24 新增）----
+# 条目分怎么来的：中文热榜命中关键词得 3 分（KEYWORDS_STRONG 每条 +3），
+# 而海外/官方源的标题是英文，打不了中文关键词分，改为直接给 prescore。
+# prescore 必须高于 3，否则同分时会被热榜的"万"级热度反超——
+# 实测 HN 的 GLM-5.4 就是这么被"百度热搜·非洲手机市场"挤掉的。
+# 想调回"国内热榜占七成"，把这里改成 3 即可；想彻底只要一手源，改成 6。
+FIRSTHAND_PRESCORE = int(os.getenv("FIRSTHAND_PRESCORE", "4"))
+
+
+# ---- 选题来源均衡（2026-11-24 新增）----
+# 背景：知乎热榜的 hot 是"万"级、HN 的 points 是"千"级、RSS 是 0，
+# 单纯按 (相关分, 热度) 排序，海外源和官方源永远排在热榜后面，
+# 五个方向里后三个等于白接。
+# 打开后 collect() 改为"按来源轮转"：每个来源先出自己最高分的那条，
+# 再出第二条……这样早报 5 条自然覆盖到热榜/官方源/HN/RSS 多个方向。
+NEWS_SOURCE_DIVERSIFY = os.getenv("NEWS_SOURCE_DIVERSIFY", "1") == "1"
+
+# ---- 同一事件跨源去重（2026-11-24 新增）----
+# 实测问题：一条"黄仁勋回归英伟达"的新闻，知乎写中文、Hacker News 写英文，
+# 两边都进了早报，5 条里 2 条讲同一件事。按 URL 去重抓不到跨语言同事件。
+# 这里用实体别名组近似：同组任意一个词命中就算提了同一主体，
+# 该主体当天已出现过就不再选第二条——早报名额有限，宁可换一条别的。
+# 只查标题不查摘要：摘要里顺带提到的公司太多，会把去重做得过于激进。
+TOPIC_ENTITY_ALIASES = [
+    ("英伟达", "nvidia"),
+    ("黄仁勋", "jensen huang"),
+    ("openai", "chatgpt", "sam altman", "奥特曼"),
+    ("anthropic", "claude"),
+    ("google", "谷歌", "deepmind", "gemini"),
+    ("meta", "llama", "扎克伯格"),
+    ("microsoft", "微软", "copilot"),
+    ("apple", "苹果"),
+    ("华为", "huawei"),
+    ("小米", "xiaomi"),
+    ("字节", "bytedance", "豆包", "抖音"),
+    ("阿里", "alibaba", "千问", "qwen", "通义"),
+    ("腾讯", "tencent", "混元"),
+    ("deepseek", "深度求索"),
+    ("智谱", "glm", "zhipu"),
+    ("月之暗面", "kimi", "moonshot"),
+    ("百川", "baichuan"),
+    ("零一万物", "lingyiwanwu"),
+    ("阶跃", "stepfun"),
+    ("minimax", "海螺"),
+]
+
 
 # 掘金技术热榜：国内开发者社区实时榜，纯技术内容（带热度/阅读量）
 # 注：CSDN 热榜接口有反爬，实测短时间多次请求即 521，故不用
