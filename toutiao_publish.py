@@ -189,7 +189,11 @@ class ToutiaoPublisher:
         'input[placeholder="验证码"]',
     )
     SMS_SEND_BTN_SELECTORS = (
-        'button.web-login-button-input__button-text',  # 实测 class 含 send-input
+        # 实测：这个按钮带 role=button 但不是 <button> 标签（DOM 摘要里只有「登录」是真 button），
+        # 所以不能写 button.xxx 前缀，按 class 匹配才命中；文字兜底排后面。
+        '.web-login-button-input__button-text',
+        '[class*="web-login-button-input__button-text"]',
+        'text=获取验证码',
         'button:has-text("获取验证码")',
     )
     SMS_SUBMIT_BTN_SELECTORS = (
@@ -309,8 +313,9 @@ class ToutiaoPublisher:
                 (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
                 for i in page.locator("input").all()[:8]
             ]
+            # 要扫 [role=button]：头条发码按钮就是 div[role=button]，不是 <button>
             btns = [(b.inner_text() or "").strip()[:12]
-                    for b in page.locator("button").all()[:8]]
+                    for b in page.locator("button, [role=button]").all()[:10]]
             return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
         except Exception:
             return " url=%s" % getattr(page, "url", "?")

@@ -1273,3 +1273,13 @@ crontab -l
 - **验证**：12 项全 PASS（延迟元素能等到 / 始终不出现返回 None / 多候选命中 / 诊断信息 /
   选择器与实测 DOM 一致 / worker 不再点 tab / 报错带诊断），py_compile 通过，路由 32 不变。
 - **注意**：发码必须填**能收短信的真实手机号**，假号段不会收到验证码会一直停在等待态。
+
+## 53. 再修「获取验证码按钮找不到」：按钮是 div[role=button] 不是 <button>（2026-11-24）
+- **现象**：加了 DOM 摘要后报错变成 `inputs=[手机号,验证码都在] buttons=['登录']`——输入框全在，
+  但 button 列表里根本没有「获取验证码」。
+- **根因**：头条这个发码按钮是 `<div class="web-login-button-input__button-text send-input" role="button">`，
+  不是 `<button>` 标签。原选择器 `button.web-login-button-input__button-text` 限定了 button 标签，永远命不中。
+  当初诊断脚本是用 `button, [role=button]` 才看到它，所以误以为它是真 button。
+- **修法**：头条发码选择器改为 `.web-login-button-input__button-text`（按 class，不限标签）+ text 兜底；
+  两家的 `_page_diag` 也改用 `button, [role=button]` 扫描，避免再漏 div 伪装的按钮。百家号发码同步加 text 兜底。
+- **验证**：11 项全 PASS，py_compile 通过，路由 32 不变。

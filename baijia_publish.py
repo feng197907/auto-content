@@ -195,6 +195,9 @@ class BaijiaPublisher:
         'input[maxlength="6"]:visible',
     )
     SMS_SEND_BTN_SELECTORS = (
+        # 头条踩过的坑：这类按钮可能是 div[role=button] 而非 <button>，加不限标签的兜底
+        'text=发送验证码',
+        'text=获取验证码',
         'button:has-text("发送验证码")',
         'button:has-text("获取验证码")',
     )
@@ -466,8 +469,9 @@ class BaijiaPublisher:
                 (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
                 for i in page.locator("input").all()[:8]
             ]
+            # 也扫 [role=button]，避免漏掉 div 伪装的按钮（头条就踩过这个坑）
             btns = [(b.inner_text() or "").strip()[:12]
-                    for b in page.locator("button").all()[:8]]
+                    for b in page.locator("button, [role=button]").all()[:10]]
             return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
         except Exception:
             return " url=%s" % getattr(page, "url", "?")
