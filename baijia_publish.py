@@ -83,10 +83,45 @@ class BaijiaError(RuntimeError):
     """百家号操作失败，消息已经翻成人话。"""
 
 
+# 登录态实测缓存：state.json 的 logged_in 会撒谎（profile 里没登录 cookie
+# 却仍写 true），存草稿时才发现失效。改为实测 + 5 分钟缓存。
+_verify_cache: dict[str, Any] = {"at": 0, "result": False}
+_VERIFY_TTL = 300
+
+
 def configured() -> bool:
+    """实测登录态（带缓存），缓存过期开浏览器核验并写回 state.json。"""
     if not playwright_ready():
         return False
-    return _load_state().get("logged_in", False)
+    now = int(time.time())
+    if now - _verify_cache["at"] < _VERIFY_TTL:
+        return _verify_cache["result"]
+    logged = False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            pub = BaijiaPublisher()
+            ctx = pub._launch(pw)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(EDIT_URL, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2500)
+                url = page.url
+                logged = ("passport" not in url and "/login" not in url
+                          and "theme/bjh" not in url)
+            finally:
+                ctx.close()
+    except Exception:  # noqa: BLE001
+        logged = False
+    _verify_cache.update({"at": now, "result": logged})
+    _save_state({"logged_in": logged})
+    return logged
+
+
+def clear_verify_cache() -> None:
+    """登录态变更后手动清缓存。"""
+    _verify_cache.update({"at": 0, "result": False})
 
 
 def playwright_ready() -> bool:
@@ -158,7 +193,7 @@ class BaijiaPublisher:
             raise BaijiaError(
                 "服务器还没装 Playwright。执行 pip install playwright 和 playwright install chromium"
             )
-        if STATE_FILE.exists() and _load_state().get("logged_in"):
+        if configured():
             return
         global login_state
         login_state = {"status": "waiting", "message": "正在打开登录页…", "qr": False, "at": int(time.time())}
@@ -336,7 +371,7 @@ class BaijiaPublisher:
             raise BaijiaError("请输入 11 位手机号")
         if login_state.get("status") in ("sending", "code_sent", "verifying"):
             raise BaijiaError("登录正在进行中，请稍候或刷新页面查看进度")
-        if STATE_FILE.exists() and _load_state().get("logged_in"):
+        if configured():
             raise BaijiaError("百家号已登录，无需重新发码")
         sms_state = {"phone": phone, "code": ""}
         login_state = {
@@ -555,8 +590,13 @@ class BaijiaPublisher:
         """把稿件存成百家号草稿（点「存草稿」，绝不点「发布」）。"""
         if not playwright_ready():
             raise BaijiaError("服务器还没装 Playwright，无法自动存草稿")
-        if not _load_state().get("logged_in"):
-            raise BaijiaError("百家号还没登录。点「百家号登录」扫码后再存草稿")
+        # 实测登录态：state.json 的死标记会撒谎，用它拦截失效 profile，
+        # 避免跳到登录页后死等标题/正文框（前端一直转圈）。
+        if not configured():
+            raise BaijiaError(
+                "百家号登录态已失效，profile 里没有有效 cookie。"
+                "请在本地跑 local_login.py baijia 真人登录一次，把 profile 搬上服务器后重启服务"
+            )
 
         title = (article.get("title") or "").strip()
         if not title:

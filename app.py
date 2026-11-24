@@ -742,7 +742,7 @@ def toutiao_draft(article_id: str) -> Any:
     if not toutiao_publish.playwright_ready():
         return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
     if not toutiao_publish.configured():
-        return jsonify({"ok": False, "error": "头条还没登录，先点「头条登录」扫码"}), 400
+        return jsonify({"ok": False, "error": "头条登录态已失效，请在本地跑 local_login.py toutiao 重新登录并把 profile 搬上服务器"}), 400
 
     toutiao_draft_state = {"running": True, "article_id": article_id, "message": "正在存草稿…", "result": None}
     threading.Thread(
@@ -862,7 +862,7 @@ def baijia_draft(article_id: str) -> Any:
     if not baijia_publish.playwright_ready():
         return jsonify({"ok": False, "error": "服务器还没装 Playwright"}), 400
     if not baijia_publish.configured():
-        return jsonify({"ok": False, "error": "百家号还没登录，先点「百家号登录」扫码"}), 400
+        return jsonify({"ok": False, "error": "百家号登录态已失效，请在本地跑 local_login.py baijia 重新登录并把 profile 搬上服务器"}), 400
 
     baijia_draft_state = {"running": True, "article_id": article_id, "message": "正在存草稿…", "result": None}
     threading.Thread(

@@ -59,13 +59,49 @@ class ToutiaoError(RuntimeError):
     """头条操作失败，消息已经翻成人话。"""
 
 
+# 登录态实测缓存：不再只信 state.json 的死标记（它会撒谎说 logged_in=true，
+# 实际 profile 里根本没有登录 cookie，导致存草稿时报 100005）。
+_verify_cache: dict[str, Any] = {"at": 0, "result": False}
+_VERIFY_TTL = 300  # 5 分钟内复用核验结果，避免每次轮询都开浏览器
+
+
 def configured() -> bool:
-    """Playwright 是否可用、profile 是否已登录。"""
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
+    """实测登录态（带 5 分钟缓存）。缓存过期就开浏览器验证并写回 state.json。
+
+    state.json 的 logged_in 只是上次核验的快照，不能再单独当真——
+    本地没搬登录态、或 cookie 过期时它仍可能停留在 true。
+    """
+    if not playwright_ready():
         return False
-    return _load_state().get("logged_in", False)
+    now = int(time.time())
+    if now - _verify_cache["at"] < _VERIFY_TTL:
+        return _verify_cache["result"]
+    logged = False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            pub = ToutiaoPublisher()
+            ctx = pub._launch(pw)
+            try:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.goto(f"{TT_BASE}/profile_v4/graphic/publish",
+                          wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2500)
+                url = page.url
+                logged = "login" not in url and "passport" not in url
+            finally:
+                ctx.close()
+    except Exception:  # noqa: BLE001
+        logged = False
+    _verify_cache.update({"at": now, "result": logged})
+    _save_state({"logged_in": logged})
+    return logged
+
+
+def clear_verify_cache() -> None:
+    """登录态变更后手动清缓存（本地登录态搬上服务器后调用）。"""
+    _verify_cache.update({"at": 0, "result": False})
 
 
 def playwright_ready() -> bool:
@@ -160,7 +196,7 @@ class ToutiaoPublisher:
                 "CentOS/Rocky 先试 dnf install -y chromium；Alibaba Cloud Linux 官方源无 chromium，"
                 "用 playwright install chromium 后按 DEPLOYED.md 第49节补系统库"
             )
-        if STATE_FILE.exists() and _load_state().get("logged_in"):
+        if configured():
             return  # 已登录不必重复扫码
 
         global login_state
@@ -382,7 +418,7 @@ class ToutiaoPublisher:
             raise ToutiaoError("请输入 11 位手机号")
         if login_state.get("status") in ("sending", "code_sent", "verifying"):
             raise ToutiaoError("登录正在进行中，请稍候或刷新页面查看进度")
-        if STATE_FILE.exists() and _load_state().get("logged_in"):
+        if configured():
             raise ToutiaoError("头条已登录，无需重新发码")
         sms_state = {"phone": phone, "code": ""}
         login_state = {
@@ -562,8 +598,13 @@ class ToutiaoPublisher:
         """
         if not playwright_ready():
             raise ToutiaoError("服务器还没装 Playwright，无法自动存草稿")
-        if not _load_state().get("logged_in"):
-            raise ToutiaoError("头条还没登录。点「头条登录」扫码后再存草稿")
+        # 实测登录态：state.json 的死标记会撒谎（profile 无登录 cookie 却写 true），
+        # 用它拦截，避免直接调发布接口拿 100005 获取用户信息失败。
+        if not configured():
+            raise ToutiaoError(
+                "头条登录态已失效，profile 里没有有效 cookie。"
+                "请在本地跑 local_login.py toutiao 真人登录一次，把 profile 搬上服务器后重启服务"
+            )
 
         title = (article.get("title") or "").strip()
         if len(title) < 2 or len(title) > 30:
