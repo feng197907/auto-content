@@ -282,6 +282,39 @@ class ToutiaoPublisher:
                 continue
         return None
 
+    def _wait_first(self, page: Any, selectors, timeout_ms: int = 12000) -> Any:
+        """按候选顺序轮询等待第一个可见元素。
+
+        头条登录页是重 JS 应用：domcontentloaded 后还要几秒才渲染出表单。
+        固定 sleep + 瞬时 is_visible() 会扑空（实测报「找不到获取验证码按钮」），
+        这里元素一出现就立刻返回，兼顾快与稳。
+        """
+        deadline = time.time() + timeout_ms / 1000.0
+        while time.time() < deadline:
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        return loc
+                except Exception:
+                    continue
+            page.wait_for_timeout(300)
+        return None
+
+    @staticmethod
+    def _page_diag(page: Any) -> str:
+        """失败时抓页面摘要写进报错，下次不用再跑诊断脚本。"""
+        try:
+            inputs = [
+                (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
+                for i in page.locator("input").all()[:8]
+            ]
+            btns = [(b.inner_text() or "").strip()[:12]
+                    for b in page.locator("button").all()[:8]]
+            return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
+        except Exception:
+            return " url=%s" % getattr(page, "url", "?")
+
     def send_code(self, phone: str) -> None:
         """第一步：打开登录页 → 填手机号 → 点「获取验证码」。
 
@@ -335,35 +368,32 @@ class ToutiaoPublisher:
             browser_ctx = self._launch(pw_ctx)
             page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
             page.goto(f"{TT_BASE}/profile_v4/graphic/publish", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2500)
-
-            # 已登录（没落到登录页）直接成功
-            if "login" not in page.url and "passport" not in page.url:
-                _save_state({"logged_in": True})
-                login_state = {
-                    "status": "success", "message": "头条已登录（无需验证码）",
-                    "qr": False, "at": int(time.time()),
-                }
-                return
-
-            # 若默认不在验证码登录 tab，尝试切过去（无害；实测默认就在）
-            tab = self._find_first(page, self.SMS_TAB_SELECTORS)
-            if tab:
-                try:
-                    tab.click(timeout=2000)
-                    page.wait_for_timeout(500)
-                except Exception:
-                    pass
-
-            phone_input = self._find_first(page, self.SMS_PHONE_SELECTORS)
+            # 关键修复：不靠固定 sleep。登录页是重 JS 应用，domcontentloaded 后表单
+            # 还要几秒才渲染；改用轮询等手机号框出现，出现即操作。
+            # 同时兼容「已登录」：若 3 秒内既没出手机号框、URL 也不在登录页，视为已登录。
+            phone_input = self._wait_first(page, self.SMS_PHONE_SELECTORS, 12000)
             if not phone_input:
-                raise ToutiaoError("没找到手机号输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+                if "login" not in page.url and "passport" not in page.url:
+                    _save_state({"logged_in": True})
+                    login_state = {
+                        "status": "success", "message": "头条已登录（无需验证码）",
+                        "qr": False, "at": int(time.time()),
+                    }
+                    return
+                raise ToutiaoError(
+                    "没找到手机号输入框（页面未渲染完或改版）." + self._page_diag(page)
+                )
+
+            # 实测默认就在验证码登录 tab，不再点 tab（点它会触发重渲染、延长等待）
+
             phone_input.fill(sms_state["phone"])
             page.wait_for_timeout(300)
 
-            send_btn = self._find_first(page, self.SMS_SEND_BTN_SELECTORS)
+            send_btn = self._wait_first(page, self.SMS_SEND_BTN_SELECTORS, 8000)
             if not send_btn:
-                raise ToutiaoError("没找到「获取验证码」按钮（页面可能改版），跑诊断脚本把 DOM 发 AI")
+                raise ToutiaoError(
+                    "没找到「获取验证码」按钮（页面未渲染完或改版）." + self._page_diag(page)
+                )
             send_btn.click(timeout=8000)
             login_state = {
                 "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
@@ -385,15 +415,15 @@ class ToutiaoPublisher:
                 }
                 return
 
-            code_input = self._find_first(page, self.SMS_CODE_SELECTORS)
+            code_input = self._wait_first(page, self.SMS_CODE_SELECTORS, 8000)
             if not code_input:
-                raise ToutiaoError("没找到验证码输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+                raise ToutiaoError("没找到验证码输入框（页面可能改版）." + self._page_diag(page))
             code_input.fill(sms_state["code"])
             page.wait_for_timeout(300)
 
-            submit_btn = self._find_first(page, self.SMS_SUBMIT_BTN_SELECTORS)
+            submit_btn = self._wait_first(page, self.SMS_SUBMIT_BTN_SELECTORS, 8000)
             if not submit_btn:
-                raise ToutiaoError("没找到「登录」按钮（页面可能改版），跑诊断脚本把 DOM 发 AI")
+                raise ToutiaoError("没找到「登录」按钮（页面可能改版）." + self._page_diag(page))
             submit_btn.click(timeout=8000)
 
             # 轮询登录是否成功（URL 离开登录页）

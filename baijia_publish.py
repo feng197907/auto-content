@@ -331,35 +331,39 @@ class BaijiaPublisher:
             page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
             # 直接打登录页；domcontentloaded 避免 EDIT_URL 的 load 事件超时
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            # 不靠固定 sleep：轮询等手机号框出现，元素一出来立刻操作。
+            phone_input = self._wait_first(page, self.SMS_PHONE_SELECTORS, 12000)
 
-            if "login" not in page.url and "passport" not in page.url and "theme/bjh" not in page.url:
-                _save_state({"logged_in": True})
-                login_state = {
-                    "status": "success", "message": "百家号已登录（无需验证码）",
-                    "qr": False, "at": int(time.time()),
-                }
-                return
-
-            # 落地页可能要先点「登录/注册百家号」才展开手机号表单
-            if not self._find_first(page, self.SMS_PHONE_SELECTORS):
+            if not phone_input:
+                # 没出表单：要么已登录，要么落地页要先点登录入口
+                if "login" not in page.url and "passport" not in page.url and "theme/bjh" not in page.url:
+                    _save_state({"logged_in": True})
+                    login_state = {
+                        "status": "success", "message": "百家号已登录（无需验证码）",
+                        "qr": False, "at": int(time.time()),
+                    }
+                    return
                 entry = self._find_first(page, self.SMS_LOGIN_ENTRY_SELECTORS)
                 if entry:
                     try:
                         entry.click(timeout=4000)
-                        page.wait_for_timeout(2500)
+                        page.wait_for_timeout(1500)
                     except Exception:
                         pass
+                phone_input = self._wait_first(page, self.SMS_PHONE_SELECTORS, 8000)
 
-            phone_input = self._find_first(page, self.SMS_PHONE_SELECTORS)
             if not phone_input:
-                raise BaijiaError("没找到手机号输入框（页面可能改版），跑诊断脚本把 DOM 发 AI")
+                raise BaijiaError(
+                    "没找到手机号输入框（页面未渲染完或改版）." + self._page_diag(page)
+                )
             phone_input.fill(sms_state["phone"])
             page.wait_for_timeout(300)
 
-            send_btn = self._find_first(page, self.SMS_SEND_BTN_SELECTORS)
+            send_btn = self._wait_first(page, self.SMS_SEND_BTN_SELECTORS, 8000)
             if not send_btn:
-                raise BaijiaError("没找到「发送验证码」按钮，跑诊断脚本把 DOM 发 AI")
+                raise BaijiaError(
+                    "没找到「发送验证码」按钮（页面未渲染完或改版）." + self._page_diag(page)
+                )
             send_btn.click(timeout=8000)
             login_state = {
                 "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
@@ -380,15 +384,15 @@ class BaijiaPublisher:
                 }
                 return
 
-            code_input = self._find_first(page, self.SMS_CODE_SELECTORS)
+            code_input = self._wait_first(page, self.SMS_CODE_SELECTORS, 8000)
             if not code_input:
-                raise BaijiaError("没找到验证码输入框，跑诊断脚本把 DOM 发 AI")
+                raise BaijiaError("没找到验证码输入框（页面可能改版）." + self._page_diag(page))
             code_input.fill(sms_state["code"])
             page.wait_for_timeout(300)
 
-            submit_btn = self._find_first(page, self.SMS_SUBMIT_BTN_SELECTORS)
+            submit_btn = self._wait_first(page, self.SMS_SUBMIT_BTN_SELECTORS, 8000)
             if not submit_btn:
-                raise BaijiaError("没找到登录按钮，跑诊断脚本把 DOM 发 AI")
+                raise BaijiaError("没找到登录按钮（页面可能改版）." + self._page_diag(page))
             submit_btn.click(timeout=8000)
 
             # 登录成功后离开登录页（进 builder 后台）
@@ -438,6 +442,35 @@ class BaijiaPublisher:
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    def _wait_first(page: Any, selectors, timeout_ms: int = 12000) -> Any:
+        """按候选顺序轮询等待第一个可见元素（登录页 JS 渲染慢，固定 sleep 会扑空）。"""
+        deadline = time.time() + timeout_ms / 1000.0
+        while time.time() < deadline:
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        return loc
+                except Exception:
+                    continue
+            page.wait_for_timeout(300)
+        return None
+
+    @staticmethod
+    def _page_diag(page: Any) -> str:
+        """失败时抓页面摘要写进报错，省得每次都跑诊断脚本。"""
+        try:
+            inputs = [
+                (i.get_attribute("name") or "", i.get_attribute("placeholder") or "")
+                for i in page.locator("input").all()[:8]
+            ]
+            btns = [(b.inner_text() or "").strip()[:12]
+                    for b in page.locator("button").all()[:8]]
+            return " url=%s inputs=%s buttons=%s" % (page.url, inputs, btns)
+        except Exception:
+            return " url=%s" % getattr(page, "url", "?")
 
     def _close_popups(self, page: Any) -> None:
         """关掉登录后首访常见的引导/广告弹窗（最多点 3 个，防误点正文按钮）。"""
