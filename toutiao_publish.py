@@ -844,9 +844,8 @@ class ToutiaoPublisher:
             "draft_form_data": json.dumps(
                 {"coverType": 1 if covers else 3}, ensure_ascii=False
             ),
-            # 0=无广告。原为 3（广告类型），账号没开广告权限时接口报 2010
-            # 「无头条广告权限」，存草稿根本不需要广告，故置 0
-            "article_ad_type": "0",
+            # article_ad_type 不传：传 3 报 2010 无广告权限，传 0 报 7050，
+            # 存草稿用接口默认即可（2026-11-24 实测）
             "is_fans_article": "0",
             "govern_forward": "0",
             "praise": "0",
