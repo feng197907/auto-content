@@ -382,6 +382,90 @@ def topic_entities(item: dict[str, Any]) -> set[str]:
     return found
 
 
+def _cjk_count(text: str) -> int:
+    """数中文字符个数，用来判断一条素材是不是中文。"""
+    return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+
+def _is_domestic_item(item: dict[str, Any]) -> bool:
+    """判断条目是不是国内中文源。
+
+    主判据是标题里有没有中文——知乎/百度/微博的标题必然是中文，
+    HN/Product Hunt/官方 RSS 的标题必然是英文，比维护来源白名单可靠。
+    来源白名单只做兜底：国内媒体写英文产品名时（如"Qwen3 发布"）标题中文偏少。
+    """
+    # 队列里的稿件用 topic 存标题，抓来的候选用 title，两边都要认
+    title = str(item.get("title") or item.get("topic") or "")
+    if _cjk_count(title) >= 4:
+        return True
+    source = str(item.get("source", ""))
+    if source.startswith("公众号"):
+        return True
+    return any(name in source for name in getattr(config, "DOMESTIC_SOURCE_NAMES", []))
+
+
+def _is_english_material(item: dict[str, Any]) -> bool:
+    """判断这条素材是不是英文，需要先翻译再写稿。
+
+    只看"英文字母多、中文几乎没有"：中英混排的标题（如"GLM-5.4 开源"）
+    读者能直接看懂，不必走翻译要求；纯英文标题才需要。
+    """
+    title = str(item.get("title") or item.get("topic") or "")
+    text = f"{title} {item.get('desc', '') or ''}"
+    latin = len(re.findall(r"[A-Za-z]", text))
+    return latin >= 20 and _cjk_count(text) < 10
+
+
+def _translation_block(item: dict[str, Any]) -> str:
+    """英文素材的翻译与本地化要求；中文素材返回空串。
+
+    为什么不能只在提示词里写"请用中文输出"：实测英文标题直接丢进去，
+    模型会把标题原样抄成英文、正文中英混排、还爱生造译名
+    （"loop transformer"被硬翻成"环形变压器"）。这里把这几类错逐条写死。
+
+    GitHub 项目类条目单独放宽第一条：仓库名是读者搜索用的标识，
+    硬翻或删掉反而让人找不到项目，所以标题允许保留英文仓库名。
+    """
+    if not getattr(config, "TRANSLATE_FOREIGN_ITEMS", True):
+        return ""
+    if not _is_english_material(item):
+        return ""
+
+    text = f"{item.get('title', '')} {item.get('url', '')} {item.get('source', '')}"
+    is_repo = "github.com" in text or "GitHub" in text or "github" in text
+    title_rule = (
+        "1. 标题必须是通顺的中文；仓库名/项目名保留英文原样（读者就按这个名字搜），"
+        "但标题其余部分必须是中文，不许整条标题都是英文\n"
+        if is_repo
+        else "1. 标题必须是通顺的中文，标题里不许留英文单词，"
+        "也不许写成「英文原标题（中文翻译）」这种中英混排\n"
+    )
+    # 实测：「循环 transformer 首次落地」这种标题读完了不知道是谁发的什么事。
+    # 英文源本来就没有中文主体名，不硬性要求的话模型会只写"某模型/某架构"。
+    title_rule += (
+        "   标题里必须出现主体名（公司名或模型/产品名，如「智谱」「GLM-5.4」"
+        "「OpenAI」），让读者一眼知道是谁发布的\n"
+    )
+
+    return (
+        "\n翻译与本地化要求（这条素材是英文，最终必须是一篇中文稿）：\n"
+        + title_rule
+        + "2. 公司名、产品名、模型名、人名第一次出现写成「中文常用译名（English 原名）」，"
+        "之后一律用中文；已经有通行叫法的（OpenAI、ChatGPT、Claude、GitHub）"
+        "直接用惯用写法，不要硬翻成「开放人工智能」这类生造译名\n"
+        "3. 技术术语用国内开发者熟悉的说法：fine-tuning→微调、inference→推理、"
+        "benchmark→基准测试、open-source→开源、agent→智能体、reasoning→推理能力\n"
+        "4. 模型架构名和论文术语（loop transformer、MoE、RLHF、diffusion 之类）"
+        "国内没有统一译名时，**直接保留英文原词，不要自己造中文名字**——"
+        "造出来的译名读者看不懂，去搜也搜不到\n"
+        "5. 数字、单位、金额、机构名按素材如实翻译，不许换算、不许四舍五入、"
+        "不许补原文没有的单位\n"
+        "6. 不许把英文原句整段贴进正文充当引文，也不许因为翻译顺手补充原文没有的背景\n"
+        "7. 素材只有一句话时，把它翻准、讲清「这是什么、解决什么问题」就够，"
+        "不要靠想象补产品细节\n"
+    )
+
+
 def build_daily_quotas(now: datetime | None = None) -> dict[str, int]:
     """算今天各栏目该生成几篇。daily_job 每天调用一次。
 
@@ -407,8 +491,50 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
     """
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    # 早报用：已经出现过的公司/主体。同一主体只占一个名额（见 config.TOPIC_ENTITY_ALIASES）
-    used_entities: set[str] = set()
+    # 实体 -> items 里的下标。早报去重与"同事件改中文源"都靠它定位。
+    # 只记录 ai_news 条目（见 config.TOPIC_ENTITY_ALIASES）。
+    entity_owner: dict[str, int] = {}
+
+    def _replace_foreign_same_event(
+        candidate: dict[str, Any], entities: set[str]
+    ) -> bool:
+        """中文源顶替同事件的英文源条目，成功返回 True（名额不变）。
+
+        为什么需要：HN 的英伟达换帅 2431 分排在第 2，知乎同一条 1478 万热度排第 4，
+        先到先得的结果是英文版占位、中文版被丢。中文读者要的是本地语境的解读，
+        同一件事有中文源时不该用英文源。
+        """
+        for entity in entities:
+            index = entity_owner.get(entity)
+            if index is None:
+                continue
+            owner = items[index]
+            if owner.get("column") != "ai_news" or _is_domestic_item(owner):
+                continue
+            # 固定槽位（GitHub 当日涨星、厂商官方源）不许被顶替：
+            # 实测「OpenAI and Cisco 合作」会被知乎一条"Dario 曾在 OpenAI 工作"
+            # 顶掉——两者只是都提到 OpenAI，根本不是同一件事，
+            # 顶完官方源那一格就空了，报道方向也跟着缺一条。
+            if owner.get("pinned"):
+                continue
+            key = (candidate.get("url") or candidate.get("title") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            row = dict(candidate)
+            row["column"] = "ai_news"
+            for old_entity in topic_entities(owner):
+                if entity_owner.get(old_entity) == index:
+                    entity_owner.pop(old_entity, None)
+            items[index] = row
+            for new_entity in topic_entities(row):
+                entity_owner[new_entity] = index
+            print(
+                f"  同事件改中文源：「{str(owner.get('title', ''))[:28]}」"
+                f"→「{str(row.get('title', ''))[:28]}」"
+            )
+            return True
+        return False
 
     def take(
         candidates: list[dict[str, Any]],
@@ -416,9 +542,13 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         column: str,
         sidebiz_only: bool = False,
         skip_sidebiz: bool = False,
+        pin: bool = False,
     ) -> int:
-        """按配额取候选，返回实际新增数。带硬过滤、栏目标记与跨栏目去重。"""
-        nonlocal used_entities
+        """按配额取候选，返回实际新增数。带硬过滤、栏目标记与跨栏目去重。
+
+        pin=True 表示固定槽位（GitHub 当日涨星、厂商官方源）：这类条目
+        不允许被后面"同事件改中文源"的逻辑顶替，否则报道方向会缺一块。
+        """
         added = 0
         for candidate in candidates:
             if added >= quota:
@@ -428,10 +558,20 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
             entities: set[str] = set()
             if column == "ai_news":
                 entities = topic_entities(candidate)
-                # 同一主体今天已经占了名额就换一条。实测踩过：一条"黄仁勋回归英伟达"
-                # 会以中文知乎版 + 英文 HN 版同时进早报，5 条里 2 条讲同一件事。
-                if entities & used_entities:
-                    continue
+                # 去重只针对"同事件"，不针对"同公司"。
+                # 实测踩过两种错：
+                #  a) 一条"黄仁勋回归英伟达"会以知乎中文版 + HN 英文版同时进早报；
+                #  b) 反过来按"先到先得"砍，又会让英文 HN 抢走名额、中文版被丢。
+                # 现在的规则：
+                #  · 英文源撞上已占位的任何条目 → 当同一事件，跳过（双语版只留一份）
+                #  · 中文源撞上英文源 → 顶替它（同一件事优先中文语境的解读）
+                #  · 中文源撞上中文源 → 放行（"OpenAI 和思科合作"与"Dario 曾在
+                #    OpenAI 工作"是两件事，只因为都提 OpenAI 就砍掉一条是误杀）
+                if entities and any(e in entity_owner for e in entities):
+                    if _is_english_material(candidate):
+                        continue
+                    if _replace_foreign_same_event(candidate, entities):
+                        continue
             is_biz = _is_sidebiz(candidate)
             if sidebiz_only and not is_biz:
                 continue
@@ -441,10 +581,14 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
             if not key or key in seen:
                 continue
             seen.add(key)
-            used_entities |= entities
             row = dict(candidate)
             row["column"] = column
+            if pin:
+                row["pinned"] = True
             items.append(row)
+            if column == "ai_news":
+                for entity in entities:
+                    entity_owner[entity] = len(items) - 1
             added += 1
         return added
 
@@ -509,6 +653,7 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
     news_quota = max(0, int(quotas.get("ai_news", 0)))
     if news_quota > 0:
         added = 0
+        gh_added = 0  # GitHub 当日涨星实际占了几条，决定要不要给 HN 留兜底位
 
         # 3a. 方向三：GitHub Trending 当日涨星 TOP3（默认只占 1 条）
         if getattr(config, "USE_GITHUB_TRENDING_DAILY", True):
@@ -531,7 +676,8 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
                 print(f"  GitHub 当日涨星抓取失败：{exc}")
                 tops = []
             slot = min(getattr(config, "GITHUB_TRENDING_DAILY_SLOTS", 1), news_quota)
-            added += take(tops, slot, "ai_news", skip_sidebiz=True)
+            gh_added = take(tops, slot, "ai_news", skip_sidebiz=True, pin=True)
+            added += gh_added
 
         # 3b. 方向一/二：厂商官方源（OpenAI/Google/DeepMind/Meta/Anthropic）占 1 条
         if getattr(config, "USE_OFFICIAL_SOURCES", True) and added < news_quota:
@@ -540,21 +686,73 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
             except Exception as exc:  # noqa: BLE001
                 print(f"  官方源选题失败：{exc}")
                 official = []
-            added += take(official, 1, "ai_news", skip_sidebiz=True)
+            added += take(official, 1, "ai_news", skip_sidebiz=True, pin=True)
 
-        # 3c. 方向四/五：热榜 + 海外（HN / Product Hunt / 知乎 / V2EX）
+        # 3c. 方向四/五：国内热榜优先，海外（HN / Product Hunt）只做兜底
         #     公众号搜索最多留 1 条——那是同行写过的稿，多了就是洗稿
-        hot = hot_topics.collect(max(news_quota * 2, 8), require_desc=True)
+        #     2026-11-24 第二轮：原来"热榜+海外"混在一起按分取，海外一手源
+        #     prescore=4 恒定压过热榜 3 分，5 条里 4 条海外、真热点反被挤掉。
+        #     现在拆成国内/海外两组，先按 domestic_cap 填国内，留 1 个海外兜底位。
+        hot = hot_topics.collect(max(news_quota * 3, 12), require_desc=True)
         wechat_rows = [x for x in hot if str(x.get("source", "")).startswith("公众号")]
-        other_rows = [x for x in hot if not str(x.get("source", "")).startswith("公众号")]
-        added += take(
-            other_rows + wechat_rows[:1], news_quota - added, "ai_news", skip_sidebiz=True
-        )
-        # 3d. 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）补位
-        if added < news_quota:
-            added += take(
-                _fetch_rss_items(news_quota), news_quota - added, "ai_news", skip_sidebiz=True
+        domestic_rows = [
+            x
+            for x in hot
+            if _is_domestic_item(x) and not str(x.get("source", "")).startswith("公众号")
+        ]
+        overseas_rows = [x for x in hot if not _is_domestic_item(x)]
+
+        if getattr(config, "NEWS_DOMESTIC_FIRST", True):
+            remaining = news_quota - added
+            # "GitHub 当日涨星" 和 "HN 高分条目" 二选一：涨星已经占了那一格，
+            # 就不再给海外留位，名额全给国内。涨星没抓到（源挂了/当日无 AI 项目）时，
+            # 才把这一格让给 HN 兜底。
+            reserve = (
+                0
+                if gh_added
+                else min(getattr(config, "OVERSEAS_NEWS_MAX", 1), max(0, remaining))
             )
+            domestic_cap = max(0, remaining - reserve)
+            # 3c-1 国内热榜先占名额
+            added += take(
+                domestic_rows + wechat_rows[:1], domestic_cap, "ai_news", skip_sidebiz=True
+            )
+            # 3c-2 国内技术媒体 RSS（IT之家/开源中国/雷峰网/爱范儿/博客园/量子位）
+            if added < domestic_cap:
+                added += take(
+                    _fetch_rss_items(news_quota),
+                    domestic_cap - added,
+                    "ai_news",
+                    skip_sidebiz=True,
+                )
+            # 3c-3 海外兜底（HN 高分条目 / Product Hunt），最多 OVERSEAS_NEWS_MAX 条
+            if added < news_quota:
+                added += take(
+                    overseas_rows, news_quota - added, "ai_news", skip_sidebiz=True
+                )
+            # 3c-4 海外也没货，把预留位还给国内（RQ 会跳过已选过的，只补新的）
+            if added < news_quota:
+                added += take(
+                    domestic_rows + wechat_rows[:1],
+                    news_quota - added,
+                    "ai_news",
+                    skip_sidebiz=True,
+                )
+        else:
+            other_rows = [
+                x for x in hot if not str(x.get("source", "")).startswith("公众号")
+            ]
+            added += take(
+                other_rows + wechat_rows[:1], news_quota - added, "ai_news", skip_sidebiz=True
+            )
+            # 3d. 国内技术媒体 RSS 补位
+            if added < news_quota:
+                added += take(
+                    _fetch_rss_items(news_quota),
+                    news_quota - added,
+                    "ai_news",
+                    skip_sidebiz=True,
+                )
         if added < news_quota:
             added += take(
                 [{"title": t, "source": "领域词库", "hot": 0} for t in config.FALLBACK_TOPICS],
@@ -929,12 +1127,15 @@ def build_prompt(item: dict[str, Any]) -> str:
     task = "请围绕下面的真实话题写一篇解读文章。"
 
     source_line = f"\n原文链接：{url}" if url else ""
+    # 英文源显式标成"英文原文标题"，否则模型会把它当成品名照抄进标题
+    topic_label = "英文原文标题" if _is_english_material(item) else "话题"
 
     return (
         f"你是内容写手。{task}\n\n"
-        f"话题：{topic}\n"
+        f"{topic_label}：{topic}\n"
         f"{material}{source_line}\n\n"
-        f"{profile_mod.prompt_block()}\n\n"
+        f"{profile_mod.prompt_block()}\n"
+        f"{_translation_block(item)}\n"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -997,14 +1198,16 @@ def build_optimize_prompt(
         )
     source_line = f"\n原文链接：{url}" if url else ""
     low, high = config.ARTICLE_WORDS[material_grade(desc)]
+    topic_label = "英文原文标题" if _is_english_material(article) else "话题"
 
     return (
         f"你是资深内容编辑。下面这篇文章已发布过，现在要基于同一真实素材"
         f"重写一个更优质的版本。不要照抄旧稿，要给出新的切入角度、更清晰的"
         f"结构和更实用的建议。\n\n"
-        f"话题：{topic}\n"
+        f"{topic_label}：{topic}\n"
         f"{material}{source_line}\n\n"
-        f"{profile_mod.prompt_block()}\n\n"
+        f"{profile_mod.prompt_block()}\n"
+        f"{_translation_block(article)}\n"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1776,7 +1979,15 @@ def build_expand_prompt(
         "这类词把句子撑长——那种段落读者一眼就能看出是凑的。**\n\n"
         f"话题：{item.get('title') or title}\n"
         f"唯一素材来源（{item.get('source', '热榜')}）：{material}\n\n"
-        "原稿：\n"
+        + (
+            "注意：这条素材原文是英文。原稿标题如果是英文或中英混排，"
+            "这一版必须改写成通顺的中文标题；正文里公司名/产品名第一次出现写成"
+            "「中文译名（English 原名）」，之后用中文，术语用国内通行说法，"
+            "不要生造译名。\n\n"
+            if _is_english_material(item)
+            else ""
+        )
+        + "原稿：\n"
         f"{body_to_text(body)}\n\n"
         "输出要求：第一行是标题，然后直接是正文。不要写'以下是扩写版本'之类的说明，"
         "不要输出解释性文字。小标题用 ## 开头，需要强调的句子用**这样**加粗，每节最多一句。"
@@ -2158,7 +2369,13 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
         "你是公众号标题编辑。任务只有一个：给同一篇文章拟 3 个不同角度的标题。\n"
         "不要重写正文，不要改变文章结论，只输出标题。\n\n"
         f"原标题：{topic}\n"
-        f"{material}\n\n"
+        + (
+            "原标题是英文。这 3 个候选标题必须是通顺的中文，"
+            "标题里不许留英文单词，也不许写成「英文（中文）」的中英混排。\n"
+            if _is_english_material(article)
+            else ""
+        )
+        + f"{material}\n\n"
         f"文章正文（节选）：\n{body}\n\n"
         f"{profile_mod.prompt_block(mode='title')}\n\n"
         f"{config.TITLE_VARIANTS_RULE}"

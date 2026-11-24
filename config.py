@@ -455,13 +455,23 @@ USE_ANTHROPIC_HTML = os.getenv("USE_ANTHROPIC_HTML", "1") == "1"
 # 且直接给 points / num_comments）。HN 条目多数没有正文摘要，
 # 所以抓下来后会用 og:description 补一次——不补的话只能写"标题级"的稿。
 USE_HN_TOPICS = os.getenv("USE_HN_TOPICS", "1") == "1"
-HN_MIN_POINTS = max(0, int(os.getenv("HN_MIN_POINTS", "80")))  # 分数太低的讨论不足以为据
+# 2026-11-24 实测：门槛 80 分太松，放进来的是"NariQ 153 分"这种圈内小众讨论，
+# 写出来读者不认识、也没人转。HN 首页真正的热点都在 1000 分上下，
+# 而 400 分是"技术圈普遍在聊"的底线，低于它不值得占早报一个名额。
+HN_MIN_POINTS = max(0, int(os.getenv("HN_MIN_POINTS", "400")))
 
 # ---- Product Hunt 当日榜（2026-11-24 新增）----
 # 官方 Atom feed，实测 1.0s、50 条，顺序即当日热度序。
 # 注意：feed 里只有一句话 tagline（约 60 字），属于"薄素材"，
 # 下游会按 thin 档写作（1000-1300 字，靠机制与判断展开，不靠细节）。
+#
+# 2026-11-24 第二轮调整：PH 是"新品发现"，不是"热点事件"——
+# 它没有票数、没有讨论量，榜位只说明"今天上新了"。
+# 所以 prescore 从 4 降到 1：仍能进候选池（英文标题过不了中文关键词表，
+# 必须自带分），但排在所有国内热榜之后，只在国内题不够时兜底。
+# 原来把榜位换算成 hot=60/52 当成"热度"参与排序，是把新品冒充热点，已去掉。
 USE_PRODUCTHUNT_TOPICS = os.getenv("USE_PRODUCTHUNT_TOPICS", "1") == "1"
+PRODUCTHUNT_PRESCORE = max(1, int(os.getenv("PRODUCTHUNT_PRESCORE", "1")))
 
 # ---- V2EX 热帖（2026-11-24 新增，默认关闭）----
 # 实测结论：服务器直连不通，且没有可用替代路径——
@@ -511,7 +521,8 @@ GITHUB_TRENDING_AI_KEYWORDS = [
 # 而海外/官方源的标题是英文，打不了中文关键词分，改为直接给 prescore。
 # prescore 必须高于 3，否则同分时会被热榜的"万"级热度反超——
 # 实测 HN 的 GLM-5.4 就是这么被"百度热搜·非洲手机市场"挤掉的。
-# 想调回"国内热榜占七成"，把这里改成 3 即可；想彻底只要一手源，改成 6。
+# 2026-11-24 第二轮：名额已改由 NEWS_DOMESTIC_FIRST 的槽位规则决定，
+# 这里的分只影响候选池内部的先后次序，不再决定国内/海外占比。
 FIRSTHAND_PRESCORE = int(os.getenv("FIRSTHAND_PRESCORE", "4"))
 
 
@@ -520,8 +531,36 @@ FIRSTHAND_PRESCORE = int(os.getenv("FIRSTHAND_PRESCORE", "4"))
 # 单纯按 (相关分, 热度) 排序，海外源和官方源永远排在热榜后面，
 # 五个方向里后三个等于白接。
 # 打开后 collect() 改为"按来源轮转"：每个来源先出自己最高分的那条，
-# 再出第二条……这样早报 5 条自然覆盖到热榜/官方源/HN/RSS 多个方向。
+# 再出第二条……这样早报 5 条自然覆盖到热榜/HN/RSS 多个方向。
 NEWS_SOURCE_DIVERSIFY = os.getenv("NEWS_SOURCE_DIVERSIFY", "1") == "1"
+
+# ---- 早报国内/海外配比（2026-11-24 第二轮调整）----
+# 实测问题：早报 5 条里 4 条是海外（GitHub 涨星 + OpenAI 官方 + HN×2），
+# 唯一一条国内还是"百度热搜·大学生造电子汴京城"。而当天真正的大热点
+# （英伟达暴涨、知乎 1478 万热度）恰恰被英文版 HN 挤掉了名额。
+# 对中文读者来说，海外榜单第 60 名的新品、HN 153 分的小众讨论都不叫热点。
+#
+# 现在改成：GitHub 当日涨星 1 条 + 厂商官方源 1 条固定（这两条是报道方向
+# 明确要求的），其余名额**先给国内**（知乎/百度/微博/国内技术媒体 RSS），
+# 国内题不够时才由海外（HN/Product Hunt）兜底，且最多 OVERSEAS_NEWS_MAX 条。
+# 关掉 NEWS_DOMESTIC_FIRST 就回到"全部混在一起按分排"的老逻辑。
+NEWS_DOMESTIC_FIRST = os.getenv("NEWS_DOMESTIC_FIRST", "1") == "1"
+OVERSEAS_NEWS_MAX = max(0, int(os.getenv("OVERSEAS_NEWS_MAX", "1")))
+
+# 这些 source 名字算"国内源"（补位时优先占名额）。
+# 公众号搜索单独归并——它的 source 是"公众号·某某号"，一个号一个名字。
+DOMESTIC_SOURCE_NAMES = [
+    "知乎热榜", "百度热搜", "微博热搜", "公众号搜索", "头条热榜",
+    "B站热搜", "抖音热榜", "快手热榜", "掘金热榜", "开源中国",
+    "IT之家", "雷峰网", "爱范儿", "博客园", "量子位", "InfoQ",
+]
+
+# ---- 英文素材强制译成中文稿（2026-11-24 新增）----
+# 海外源（HN / Product Hunt / 官方 RSS）的标题和摘要都是英文，直接丢给模型
+# 会出现三种毛病：标题照抄英文、正文中英混排、专有名词生造译名。
+# 打开后，判定为英文素材的条目会在提示词里追加一段翻译与本地化要求；
+# 生成、重写优化、扩写、换标题四条链路都生效。
+TRANSLATE_FOREIGN_ITEMS = os.getenv("TRANSLATE_FOREIGN_ITEMS", "1") == "1"
 
 # ---- 同一事件跨源去重（2026-11-24 新增）----
 # 实测问题：一条"黄仁勋回归英伟达"的新闻，知乎写中文、Hacker News 写英文，

@@ -684,6 +684,10 @@ def fetch_producthunt(limit: int = 10, timeout: int = 10) -> list[dict[str, Any]
     实测 1.0s 返回 50 条，顺序即当日热度序（feed 里没有票数字段）。
     每条只有一句 tagline（约 60 字），属于薄素材——
     下游按 thin 档写作，靠"这是什么产品、解决什么问题"展开，不堆细节。
+
+    hot 一律给 0、榜位单独放 rank：PH 是"新品上架"，没有票数和讨论量，
+    以前把榜位换算成 hot=60/52 参与排序，等于把新品冒充热点，
+    会顶掉知乎/百度真正的热榜条目。现在它只用 prescore=1 垫在最后兜底。
     """
     try:
         import feedparser
@@ -716,9 +720,10 @@ def fetch_producthunt(limit: int = 10, timeout: int = 10) -> list[dict[str, Any]
             "title": title,
             "desc": summary,
             "url": entry.get("link") or "",
-            "hot": max(0, 60 - index),  # 没有票数，用榜单位置当热度
+            "hot": 0,  # PH 不给票数，不冒充热度（榜位见 rank）
+            "rank": index + 1,
             "source": "Product Hunt",
-            "prescore": getattr(config, "FIRSTHAND_PRESCORE", 4),
+            "prescore": getattr(config, "PRODUCTHUNT_PRESCORE", 1),
         })
     return result
 
