@@ -232,22 +232,36 @@ class ToutiaoPublisher:
         )
 
     def _launch(self, pw: Any) -> Any:
-        """启动持久化 context。登录态存在 profile 目录，跨进程复用。"""
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        kwargs: dict[str, Any] = {
-            "user_data_dir": str(PROFILE_DIR),
+        """启动浏览器上下文：有 storage_state 就用它，没有才回退_profile。
+
+        2026-11-24 实测：字节系风控 token 一部分在 localStorage
+        (__tea_cache_tokens_1231 / tt_scid / xmst)。只 add_cookies 时 cookie
+        齐全（sessionid/sid_tt 都在）仍被踢回 /auth/page/login；换成官方
+        new_context(storage_state=...) 同时还原 cookie + localStorage 后正常进后台。
+        launch_persistent_context 不支持 storage_state，所以分成两条路。
+        """
+        launch_kwargs: dict[str, Any] = {
             "headless": self.headless,
-            "viewport": {"width": 1280, "height": 900},
             "args": ["--disable-blink-features=AutomationControlled"],
         }
-        # RHEL 系用 dnf 装的系统 Chromium；探测到就显式指定，绕开自带包缺库的问题
         if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
-            kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
-        ctx = pw.chromium.launch_persistent_context(**kwargs)
-        # 注入本地导出的明文登录态：Windows Edge 的 profile 目录搬到 Linux 会因
-        # DPAPI 加密丢 cookie，所以改用 storage_state JSON + add_cookies 注入。
-        _inject_cookies(ctx, COOKIES_FILE)
-        return ctx
+            launch_kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
+
+        # 本地真人登录导出的完整登录态（明文 JSON，跨平台可用）
+        if COOKIES_FILE.exists():
+            browser = pw.chromium.launch(**launch_kwargs)
+            return browser.new_context(
+                storage_state=str(COOKIES_FILE),
+                viewport={"width": 1280, "height": 900},
+            )
+
+        # 回退：服务器本地扫码登录留下的持久化 profile
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        return pw.chromium.launch_persistent_context(
+            **launch_kwargs,
+            user_data_dir=str(PROFILE_DIR),
+            viewport={"width": 1280, "height": 900},
+        )
 
     def check_login(self) -> bool:
         """打开 profile 检查登录态：能进创作后台即算已登录。"""
@@ -688,8 +702,8 @@ class ToutiaoPublisher:
         # 用它拦截，避免直接调发布接口拿 100005 获取用户信息失败。
         if not configured(verify=True):
             raise ToutiaoError(
-                "头条登录态已失效，profile 里没有有效 cookie。"
-                "请在本地跑 local_login.py toutiao 真人登录一次，把 profile 搬上服务器后重启服务"
+                "头条登录态已失效。请在本地跑 local_login.py toutiao 重新登录，"
+                "把 data/toutiao_cookies.json 传上服务器后重启服务"
             )
 
         title = (article.get("title") or "").strip()

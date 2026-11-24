@@ -236,20 +236,32 @@ class BaijiaPublisher:
         self.headless = config.TOUTIAO_HEADLESS if headless is None else headless
 
     def _launch(self, pw: Any) -> Any:
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        kwargs: dict[str, Any] = {
-            "user_data_dir": str(PROFILE_DIR),
+        """有完整 storage_state 就用 new_context（cookie + localStorage 一起还原）。
+
+        2026-11-24 实测：百家号的 edit-token / BMAP_SECKEY 等风控 token 在
+        localStorage，只注入 cookie 仍跳 theme/bjh/login；完整 storage_state
+        能正常进编辑页。launch_persistent_context 不支持 storage_state。
+        """
+        launch_kwargs: dict[str, Any] = {
             "headless": self.headless,
-            "viewport": {"width": 1440, "height": 960},
             "args": ["--disable-blink-features=AutomationControlled"],
         }
-        # 与头条共用同一套浏览器探测：RHEL 系走 dnf 装的系统 Chromium
         if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
-            kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
-        ctx = pw.chromium.launch_persistent_context(**kwargs)
-        # 注入本地导出的明文登录态（同头条，绕开 DPAPI 加密）
-        _inject_cookies(ctx, COOKIES_FILE)
-        return ctx
+            launch_kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
+
+        if COOKIES_FILE.exists():
+            browser = pw.chromium.launch(**launch_kwargs)
+            return browser.new_context(
+                storage_state=str(COOKIES_FILE),
+                viewport={"width": 1440, "height": 960},
+            )
+
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        return pw.chromium.launch_persistent_context(
+            **launch_kwargs,
+            user_data_dir=str(PROFILE_DIR),
+            viewport={"width": 1440, "height": 960},
+        )
 
     def check_login(self) -> bool:
         if not playwright_ready():
@@ -678,8 +690,8 @@ class BaijiaPublisher:
         # 避免跳到登录页后死等标题/正文框（前端一直转圈）。
         if not configured(verify=True):
             raise BaijiaError(
-                "百家号登录态已失效，profile 里没有有效 cookie。"
-                "请在本地跑 local_login.py baijia 真人登录一次，把 profile 搬上服务器后重启服务"
+                "百家号登录态已失效。请在本地跑 local_login.py baijia 重新登录，"
+                "把 data/baijia_cookies.json 传上服务器后重启服务"
             )
 
         title = (article.get("title") or "").strip()
