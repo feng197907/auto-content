@@ -333,6 +333,40 @@ class ToutiaoPublisher:
         except Exception:
             return " url=%s" % getattr(page, "url", "?")
 
+    @staticmethod
+    def _sms_send_feedback(page: Any) -> str:
+        """点「获取验证码」后读页面反馈；返回人话错误，'' 表示看起来真发了。
+
+        以前点完就无条件报「已发送」，未注册/风控拦截时用户会一直等一条
+        根本不存在的短信。这里读 toast/表单附近提示，把真实原因传回前端。
+        """
+        page.wait_for_timeout(1500)
+        texts: list[str] = []
+        for sel in ('[class*="toast"]', '[class*="Toast"]', '[role="alert"]',
+                    '.error-tip', '[class*="error-msg"]'):
+            try:
+                for loc in page.locator(sel).all()[:6]:
+                    if not loc.is_visible():
+                        continue
+                    t = (loc.inner_text() or "").strip()
+                    if t and len(t) <= 100:
+                        texts.append(t)
+            except Exception:
+                continue
+        try:
+            body = page.locator("body").inner_text(timeout=2000) or ""
+            texts.append(body[:600])
+        except Exception:
+            pass
+        joined = " | ".join(texts)
+        # 只认精确词，避免把页面正常的「验证码登录」误判成失败
+        for word in ("未注册", "尚未注册", "手机号不存在", "号码不存在", "发送失败",
+                     "获取验证码失败", "操作过于频繁", "操作太频繁", "号码有误",
+                     "手机号有误", "请完成安全验证", "请完成滑块"):
+            if word in joined:
+                return "平台没真发出短信：页面提示「%s」。请确认是头条注册手机号或稍后再试" % word
+        return ""
+
     def send_code(self, phone: str) -> None:
         """第一步：打开登录页 → 填手机号 → 点「获取验证码」。
 
@@ -382,9 +416,11 @@ class ToutiaoPublisher:
         try:
             from playwright.sync_api import sync_playwright
 
+            login_state = {"status": "sending", "message": "正在启动浏览器…", "qr": False, "at": int(time.time())}
             pw_ctx = sync_playwright().start()
             browser_ctx = self._launch(pw_ctx)
             page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
+            login_state = {"status": "sending", "message": "正在打开头条登录页…", "qr": False, "at": int(time.time())}
             page.goto(f"{TT_BASE}/profile_v4/graphic/publish", wait_until="domcontentloaded", timeout=30000)
             # 关键修复：不靠固定 sleep。登录页是重 JS 应用，domcontentloaded 后表单
             # 还要几秒才渲染；改用轮询等手机号框出现，出现即操作。
@@ -402,6 +438,8 @@ class ToutiaoPublisher:
                     "没找到手机号输入框（页面未渲染完或改版）." + self._page_diag(page)
                 )
 
+            login_state = {"status": "sending", "message": "正在填手机号、点发送验证码…", "qr": False, "at": int(time.time())}
+
             # 实测默认就在验证码登录 tab，不再点 tab（点它会触发重渲染、延长等待）
 
             phone_input.fill(sms_state["phone"])
@@ -413,8 +451,12 @@ class ToutiaoPublisher:
                     "没找到「获取验证码」按钮（页面未渲染完或改版）." + self._page_diag(page)
                 )
             send_btn.click(timeout=8000)
+            # 点完不立刻报成功：先读页面真实反馈，未注册/风控拦截会在这里被抓住
+            feedback = self._sms_send_feedback(page)
+            if feedback:
+                raise ToutiaoError(feedback)
             login_state = {
-                "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
+                "status": "code_sent", "message": "已点发送验证码，请查收短信并填入",
                 "qr": False, "at": int(time.time()),
             }
 

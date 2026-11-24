@@ -292,6 +292,40 @@ class BaijiaPublisher:
             }
 
     # ---- 短信验证码登录（两步式）----
+    @staticmethod
+    def _sms_send_feedback(page: Any) -> str:
+        """点「发送验证码」后读页面反馈；返回人话错误，'' 表示看起来真发了。
+
+        遍历所有 frame（百家号表单常在 iframe 里），只看 toast/错误提示类元素
+        和 body 可见文本，避免把「验证码登录」等正常文案误判为失败。
+        """
+        page.wait_for_timeout(2500)
+        texts: list[str] = []
+        for frame in BaijiaPublisher._all_frames(page):
+            for sel in ('[class*="toast"]', '[class*="Toast"]', '[role="alert"]',
+                        '.error-tip', '[class*="error-msg"]', '[class*="ant-message"]'):
+                try:
+                    for loc in frame.locator(sel).all()[:6]:
+                        if not loc.is_visible():
+                            continue
+                        t = (loc.inner_text() or "").strip()
+                        if t and len(t) <= 100:
+                            texts.append(t)
+                except Exception:
+                    continue
+        try:
+            body = page.locator("body").inner_text(timeout=2000) or ""
+            texts.append(body[:600])
+        except Exception:
+            pass
+        joined = " | ".join(texts)
+        for word in ("未注册", "尚未注册", "手机号不存在", "号码不存在", "发送失败",
+                     "获取验证码失败", "操作过于频繁", "操作太频繁", "号码有误",
+                     "手机号有误", "请完成安全验证", "请完成滑块", "账号不存在"):
+            if word in joined:
+                return "平台没真发出短信：页面提示「%s」。请确认是百度注册手机号或稍后再试" % word
+        return ""
+
     def send_code(self, phone: str) -> None:
         """第一步：打开登录页 → 填手机号 → 点「发送验证码」，后台会话等待提交。"""
         global login_state, sms_state
@@ -335,9 +369,11 @@ class BaijiaPublisher:
         try:
             from playwright.sync_api import sync_playwright
 
+            login_state = {"status": "sending", "message": "正在启动浏览器…", "qr": False, "at": int(time.time())}
             pw_ctx = sync_playwright().start()
             browser_ctx = self._launch(pw_ctx)
             page = browser_ctx.pages[0] if browser_ctx.pages else browser_ctx.new_page()
+            login_state = {"status": "sending", "message": "正在打开百家号登录页…", "qr": False, "at": int(time.time())}
             # 直接打登录页；domcontentloaded 避免 EDIT_URL 的 load 事件超时
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
             # 不靠固定 sleep：轮询等手机号框出现，元素一出来立刻操作。
@@ -365,6 +401,7 @@ class BaijiaPublisher:
                 raise BaijiaError(
                     "没找到手机号输入框（页面未渲染完或改版）." + self._page_diag(page)
                 )
+            login_state = {"status": "sending", "message": "正在填手机号、点发送验证码…", "qr": False, "at": int(time.time())}
             phone_input.fill(sms_state["phone"])
             page.wait_for_timeout(300)
 
@@ -374,8 +411,12 @@ class BaijiaPublisher:
                     "没找到「发送验证码」按钮（页面未渲染完或改版）." + self._page_diag(page)
                 )
             send_btn.click(timeout=8000)
+            # 点完不立刻报成功：先读页面真实反馈，未注册/风控拦截会在这里被抓住
+            feedback = self._sms_send_feedback(page)
+            if feedback:
+                raise BaijiaError(feedback)
             login_state = {
-                "status": "code_sent", "message": "验证码已发送，请查收短信并填入",
+                "status": "code_sent", "message": "已点发送验证码，请查收短信并填入",
                 "qr": False, "at": int(time.time()),
             }
 
