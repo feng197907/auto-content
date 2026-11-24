@@ -401,6 +401,17 @@ def fetch_wechat_search(limit: int = 12, timeout: int = 10) -> list[dict[str, An
             print(f"  微信搜索触发验证码，跳过剩余关键词（{keyword}）")
             break
 
+        # 2026-11-24 实测：服务器直连返回 HTTP 200 但正文长度 0（IP 已被封），
+        # 不报错、不验证码，静默返回空列表。原来这里什么都不打印，
+        # 日志看起来像"今天没有副业素材"，实际是这个源已经彻底断供——
+        # 副业栏历史 9 篇 100% 来自这里，断了就直接掉到兜底词库空写。
+        if len(html) < 500:
+            print(
+                f"  微信搜索返回空响应（{keyword}，长度 {len(html)}）："
+                "搜狗已封本机 IP，该源当前不可用，副业栏将回退到热榜/兜底词库"
+            )
+            break
+
         for block in re.findall(r'<div class="txt-box">(.*?)</li>', html, re.S)[:limit]:
             title_match = re.search(r"<h3>\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
             if not title_match:

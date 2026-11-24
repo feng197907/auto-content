@@ -368,6 +368,50 @@ def _is_sidebiz(item: dict[str, Any]) -> bool:
     return any(w in text for w in config.SIDE_BIZ_KEYWORDS)
 
 
+# 带单位的数字（金额/时长/单量/比例），用来衡量副业素材到底有没有"能算的东西"
+_BIZ_NUMBER_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:元|块|万|亿|千|%|％|天|周|月|小时|分钟|个|单|篇|号|人|次|倍)"
+)
+# 具体平台名也算素材厚度：写得出平台，说明这条素材落到了可执行层面
+_BIZ_PLATFORM_RE = re.compile(
+    r"小红书|闲鱼|抖音|视频号|B站|bilibili|知乎|公众号|拼多多|淘宝|淘宝客|"
+    r"猪八戒|Fiverr|Upwork|Etsy|Shopify|亚马逊|快手|头条|百家号|剪映|Midjourney|"
+    r"Stable Diffusion|ComfyUI|GPT|Claude|即梦|可灵",
+    re.IGNORECASE,
+)
+
+
+def _sidebiz_material_score(item: dict[str, Any]) -> int:
+    """副业候选的素材厚度分，用于排序（分越高越先取）。
+
+    背景（2026-11-24 实测）：9 篇副业稿 100% 来自公众号搜索，素材是
+    "同行标题 + 一句摘要"，正文只能靠通用道理推演，平均只带 1.2 个数字。
+    同样是副业候选，带真实金额/单量/平台名的那条能写出可核对的内容，
+    只有一句感慨的那条必然写成空话——所以取题阶段就按这个分排。
+    """
+    desc = str(item.get("desc") or "")
+    title = str(item.get("title") or "")
+    text = f"{title} {desc}"
+    score = 0
+    # 摘要过了门槛才有"事件本身"可讲，才不至于只剩通用道理
+    if len(desc) >= getattr(config, "SIDE_BIZ_MIN_DESC_CHARS", 40):
+        score += 2
+    score += min(len(desc) // 40, 5)          # 摘要够长才有可讲的东西，最多 +5
+    score += min(len(_BIZ_NUMBER_RE.findall(text)), 6) * 2  # 每个带单位数字 +2，最多 +12
+    score += min(len(set(p.lower() for p in _BIZ_PLATFORM_RE.findall(text))), 3)  # 平台名最多 +3
+    if item.get("url"):
+        score += 1                             # 有原文链接，至少能回查
+    if str(item.get("source", "")).startswith("公众号"):
+        score -= 2                             # 同行二手稿，同分时让给热榜/一手源
+    return score
+
+
+def _sidebiz_has_data(item: dict[str, Any]) -> bool:
+    """素材里有没有能落地的数字（金额/时长/单量）。"""
+    text = f"{item.get('title', '')} {item.get('desc', '') or ''}"
+    return bool(_BIZ_NUMBER_RE.search(text))
+
+
 def topic_entities(item: dict[str, Any]) -> set[str]:
     """从标题里认出提到的公司/主体（按 config.TOPIC_ENTITY_ALIASES 的别名组）。
 
@@ -414,6 +458,37 @@ def _is_english_material(item: dict[str, Any]) -> bool:
     text = f"{title} {item.get('desc', '') or ''}"
     latin = len(re.findall(r"[A-Za-z]", text))
     return latin >= 20 and _cjk_count(text) < 10
+
+
+def _sidebiz_block(item: dict[str, Any]) -> str:
+    """副业稿专用的数字要求；非副业稿件返回空串。
+
+    只有 column=ai_sidebiz 才注入，早报（ai_news）完全不经过这里——
+    早报要的是"这条资讯是什么"，副业要的是"要投多少、多久见钱"，
+    两套写作目标不同，混用会把早报写成算账文、把副业写回资讯通稿。
+    """
+    if classify_column(item) != "ai_sidebiz":
+        return ""
+    rule = getattr(config, "SIDE_BIZ_DATA_RULE", "")
+    if not rule:
+        return ""
+    desc = str(item.get("desc") or "")
+    if not _sidebiz_has_data(item):
+        # 素材里连一个带单位的数字都没有，先告诉模型"没有"，比让它自由发挥安全
+        return (
+            rule
+            + "\n\n本次素材提示：这条素材里没有任何金额、时长或单量数字。"
+            "正文必须直说「这类副业目前没有公开收益数据」，"
+            "然后给读者可核查的口径（平台名、结算方式、怎么自己试出单价）。"
+            "严禁自己补一个收益数字充当事实。"
+            # 实测放开口子后，模型会写"按每单 50 元算一个月 500 元"——
+            # 金额一编就是收益承诺，读者会照着算。所以无素材时直接禁掉金额，
+            # 只留时间/次数/单量这类读者自己能验证的量。
+            "**正文里不许出现任何金额数字（元、块、万、亿）**，"
+            "时间、次数、单量可以写；需要谈钱时只写「单价与结算方式以平台当前规则为准」，"
+            "不要给具体数字。\n"
+        )
+    return rule + "\n"
 
 
 def _translation_block(item: dict[str, Any]) -> str:
@@ -611,22 +686,83 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         )
         take(gh, gh_quota, "github")
 
-    # 2. AI 副业：公众号搜索（关键词已含副业词）> 热榜命中副业词的 > 兜底词库
+    # 2. AI 副业：热榜/一手源命中副业词的优先 > 公众号搜索（素材补充）> 兜底词库
+    #    2026-11-24 调整：原来第一个来源是搜狗微信搜索（同行写过的稿），实测 9 篇
+    #    副业稿 100% 来自这里、0 篇来自热榜——素材只有一句同行标题加一句摘要，
+    #    正文只能靠通用道理推演，平均只带 1.2 个"带单位的数字"。
+    #    现在反过来：热榜/一手源优先（有真实事件和数字），公众号搜索退为素材补充
+    #    （SIDE_BIZ_WECHAT_AS_FALLBACK=1），兜底词库最后。
+    #    顺序之外按"素材厚度"排序：有金额/单量/平台名的排前面，
+    #    只有一句感慨的排后面——不然它占了名额，写出来必然是空话。
     biz_quota = max(0, int(quotas.get("ai_sidebiz", 0)))
     if biz_quota > 0:
-        biz_pool: list[dict[str, Any]] = []
+        hot_biz: list[dict[str, Any]] = []
+        wechat_biz: list[dict[str, Any]] = []
+        try:
+            hot_biz = [
+                x
+                for x in hot_topics.collect(max(biz_quota * 4, 12), require_desc=True)
+                if _is_sidebiz(x)
+            ]
+        except Exception as exc:  # noqa: BLE001 - 单源挂了不影响其它源
+            print(f"  副业栏·热榜抓取失败：{exc}")
+        # 国内技术媒体 RSS 里命中副业词的（爱范儿/IT之家偶尔会写"AI 变现"报道）。
+        # 搜狗微信 2026-11-24 起对本机返回空响应，副业栏实际只剩这一条真实素材来源，
+        # 不接上就只能靠兜底词库空写。
+        try:
+            rss_biz = [
+                x for x in _fetch_rss_items(max(biz_quota * 8, 24))
+                if _is_sidebiz(x)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            print(f"  副业栏·国内媒体抓取失败：{exc}")
+            rss_biz = []
+        # 热榜 + 国内媒体合成"真实素材段"，按同链接去重后再按素材厚度排序
+        primary_biz: list[dict[str, Any]] = []
+        _seen_biz: set[str] = set()
+        for row in hot_biz + rss_biz:
+            key_biz = str(row.get("url") or row.get("title") or "").strip()
+            if not key_biz or key_biz in _seen_biz:
+                continue
+            _seen_biz.add(key_biz)
+            primary_biz.append(row)
+        primary_biz.sort(key=_sidebiz_material_score, reverse=True)
         if getattr(config, "USE_WECHAT_SEARCH", True):
             try:
-                biz_pool.extend(hot_topics.fetch_wechat_search(max(biz_quota * 3, 9)))
-            except Exception as exc:  # noqa: BLE001 - 单源挂了不影响其它源
+                wechat_biz = hot_topics.fetch_wechat_search(max(biz_quota * 3, 9))
+            except Exception as exc:  # noqa: BLE001
                 print(f"  副业栏·公众号搜索失败：{exc}")
+
+        # 队列里已经出过的副业题不再重复：实测同一条同行爆款被搜到三次，
+        # 三分钟内生成了 3 篇同题稿。只对公众号搜索去重——热榜每天本来就在变，
+        # 且它才是"同题重复"的根源。
+        def _norm_biz_title(text: str) -> str:
+            return re.sub(r"[\s·:：,，。.、!！?？\"'“”‘’（）()【】\[\]-]", "", text or "")
+
         try:
-            biz_pool.extend(
-                x for x in hot_topics.collect(max(biz_quota * 4, 12), require_desc=True)
-                if _is_sidebiz(x)
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  副业栏·热榜抓取失败：{exc}")
+            recent_biz = [
+                _norm_biz_title(str(a.get("title") or ""))
+                for a in load_queue()
+                if a.get("column") == "ai_sidebiz"
+            ]
+        except Exception:  # noqa: BLE001 - 去重失败不该挡住出稿
+            recent_biz = []
+        if recent_biz and wechat_biz:
+            deduped: list[dict[str, Any]] = []
+            for row in wechat_biz:
+                norm = _norm_biz_title(str(row.get("title") or ""))
+                # 互相包含即视为同题（同行标题常在前后加减几个字）；太短的标题不比，避免误杀
+                same = norm and any(
+                    len(norm) >= 8 and len(old) >= 8 and (norm in old or old in norm)
+                    for old in recent_biz
+                )
+                if same:
+                    continue
+                deduped.append(row)
+            wechat_biz = deduped
+
+        wechat_biz.sort(key=_sidebiz_material_score, reverse=True)
+
         # 兜底词库按日期轮换，并跳过队列里最近用过的题——
         # 公众号搜索常触发验证码，兜底词是高频路径，不轮换就会天天出同样两条。
         try:
@@ -641,9 +777,21 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         offset = datetime.now().day % len(all_fallback) if all_fallback else 0
         rotated = all_fallback[offset:] + all_fallback[:offset]
         fresh = [t for t in rotated if t not in used_biz] or rotated
-        biz_pool.extend(
-            {"title": t, "source": "副业词库", "hot": 0} for t in fresh
-        )
+        biz_fallback = [{"title": t, "source": "副业词库", "hot": 0} for t in fresh]
+
+        if getattr(config, "SIDE_BIZ_WECHAT_AS_FALLBACK", True):
+            biz_pool = primary_biz + wechat_biz + biz_fallback
+        else:  # 旧顺序，留开关方便回滚
+            biz_pool = wechat_biz + primary_biz + biz_fallback
+        # 前 biz_quota 条一条素材都没有时把话说在前头：这几篇只能给口径、给不了数字。
+        # 2026-11-24 实测就是这个状态——搜狗微信被墙（返回空）、热榜无一命中副业词，
+        # 副业栏 100% 掉到兜底词库。日志里写清，免得事后以为是提示词没生效。
+        head = biz_pool[:biz_quota]
+        if head and not any(str(r.get("desc") or "").strip() for r in head):
+            print(
+                "  副业栏·本次候选全无素材（公众号搜索无结果 + 热榜/RSS 无副业命中），"
+                "靠兜底词库出稿：正文只会给可核查口径，不会给收益数字"
+            )
         take(biz_pool, biz_quota, "ai_sidebiz", sidebiz_only=True)
 
     # 3. AI 早报：按报道方向留固定槽位，再让热榜/海外源补位
@@ -1105,6 +1253,14 @@ def build_prompt(item: dict[str, Any]) -> str:
 
     grade = material_grade(desc)
     low, high = config.ARTICLE_WORDS[grade]
+    # 副业稿走自己的标题规则与数字要求；早报继续用 TITLE_RULE。
+    # 判据统一用 classify_column，跟审核页栏目筛选、队列 column 字段是同一套，
+    # 不另起一套判断，避免"页面归副业、提示词按早报写"这种串台。
+    is_sidebiz = classify_column(item) == "ai_sidebiz"
+    title_rule = (
+        getattr(config, "SIDE_BIZ_TITLE_RULE", config.TITLE_RULE) if is_sidebiz
+        else config.TITLE_RULE
+    )
     length_rule = (
         f"2. 正文 {low}-{high} 字。字数靠「合法展开」那五条把每节写满，"
         "不是靠形容词和排比句灌水"
@@ -1136,6 +1292,7 @@ def build_prompt(item: dict[str, Any]) -> str:
         f"{material}{source_line}\n\n"
         f"{profile_mod.prompt_block()}\n"
         f"{_translation_block(item)}\n"
+        f"{_sidebiz_block(item)}"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1150,7 +1307,7 @@ def build_prompt(item: dict[str, Any]) -> str:
         "6. 篇幅不够时按「怎么把文章写厚而不注水」那五条展开，"
         "绝不靠编造事实或堆形容词凑字数\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
-        f"{config.TITLE_RULE}\n"
+        f"{title_rule}\n"
         f"{length_rule}\n"
         "3. 小标题必须用两个井号加一个空格开头，格式严格为：## 小标题文字\n"
         "   （不要写成 H2、不要写成'一、'、不要带尖括号或任何 HTML 标签）\n"
@@ -1199,6 +1356,19 @@ def build_optimize_prompt(
     source_line = f"\n原文链接：{url}" if url else ""
     low, high = config.ARTICLE_WORDS[material_grade(desc)]
     topic_label = "英文原文标题" if _is_english_material(article) else "话题"
+    # 副业稿优化时同样走副业规则：否则点一次"重写优化"，标题就被改回早报风格，
+    # 数字要求也一并丢掉。判据与生成、审核页筛选共用 classify_column。
+    is_sidebiz = classify_column(article) == "ai_sidebiz"
+    title_rule = (
+        getattr(config, "SIDE_BIZ_TITLE_RULE", config.TITLE_RULE) if is_sidebiz
+        else config.TITLE_RULE
+    )
+    title_opt_line = (
+        "1. 标题按上面的副业四公式重拟，比旧稿更具体："
+        "给规模、给净额、给路径，不许写成劝退结论\n"
+        if is_sidebiz
+        else "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
+    )
 
     return (
         f"你是资深内容编辑。下面这篇文章已发布过，现在要基于同一真实素材"
@@ -1208,6 +1378,7 @@ def build_optimize_prompt(
         f"{material}{source_line}\n\n"
         f"{profile_mod.prompt_block()}\n"
         f"{_translation_block(article)}\n"
+        f"{_sidebiz_block(article)}"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1221,11 +1392,11 @@ def build_optimize_prompt(
         "这类信息会在排版时被统一去掉，写进去只会是废话\n"
         "6. 素材撑不满时宁可写短，绝不用编造的内容凑字数\n\n"
         "优化要求：\n"
-        "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
+        f"{title_opt_line}"
         "2. 开头结论更干脆，中段分点更可执行，结尾行动清单更具体\n"
         f"3. 全文 {low}-{high} 字，不要空话套话和营销腔\n\n"
         "输出格式（严格遵守，否则无法发布）：\n"
-        f"{config.TITLE_RULE}\n"
+        f"{title_rule}\n"
         "2. 小标题用两个井号加一个空格开头，格式严格为：## 小标题文字\n"
         "3. 需要强调的句子用**这样**加粗，每节最多加粗一句\n"
         "4. 命令、配置片段用三个反引号单独包成代码块，一行一条命令\n"
@@ -2365,6 +2536,15 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
             "标题里的数字只能来自下面的正文，正文没有就别写数字。"
         )
 
+    # 副业稿换标题时用副业的三公式（规模设问/算账/路径门槛），
+    # 不能用早报那套（具体信息点/反差/利益直给）——那套会把"劝退结论"
+    # 当成合法的反差标题放出来，正是副业稿打开率低的原因。
+    variants_rule = (
+        getattr(config, "SIDE_BIZ_TITLE_VARIANTS_RULE", config.TITLE_VARIANTS_RULE)
+        if classify_column(article) == "ai_sidebiz"
+        else config.TITLE_VARIANTS_RULE
+    )
+
     return (
         "你是公众号标题编辑。任务只有一个：给同一篇文章拟 3 个不同角度的标题。\n"
         "不要重写正文，不要改变文章结论，只输出标题。\n\n"
@@ -2378,7 +2558,7 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
         + f"{material}\n\n"
         f"文章正文（节选）：\n{body}\n\n"
         f"{profile_mod.prompt_block(mode='title')}\n\n"
-        f"{config.TITLE_VARIANTS_RULE}"
+        f"{variants_rule}"
     )
 
 
