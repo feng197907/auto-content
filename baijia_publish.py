@@ -703,7 +703,8 @@ class BaijiaPublisher:
         with sync_playwright() as pw:
             ctx = self._launch(pw)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto(EDIT_URL, timeout=30000)
+            # 用 domcontentloaded 避免第三方资源拖住 load 事件直到超时
+            page.goto(EDIT_URL, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
             self._close_popups(page)
 

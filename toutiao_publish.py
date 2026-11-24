@@ -716,7 +716,9 @@ class ToutiaoPublisher:
         with sync_playwright() as pw:
             ctx = self._launch(pw)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto(f"{TT_BASE}/profile_v4/graphic/publish", timeout=30000)
+            # 用 domcontentloaded：后台 load 事件常因第三方资源卡住直到超时
+            page.goto(f"{TT_BASE}/profile_v4/graphic/publish",
+                      wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2500)
 
             # 1) 封面（可选）：封面单独用 upload_source=20020003
