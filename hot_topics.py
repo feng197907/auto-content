@@ -286,6 +286,271 @@ def fetch_zhihu(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
     return result
 
 
+def _zhihu_cookie_value() -> str:
+    """取出可用的 z_c0；返回空串表示没有登录态。
+
+    允许用户直接贴整串 cookie（`z_c0=xxx; other=yyy`），这里只挑 z_c0——
+    知乎的登录态就靠它，其余字段带了也没用，还可能因为过期字段触发风控。
+    """
+    raw = str(getattr(config, "ZHIHU_COOKIE", "") or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?:^|;\s*)z_c0=([^;]+)", raw)
+    if match:
+        return match.group(1).strip()
+    if raw.lower().startswith("z_c0="):
+        return raw.split("=", 1)[1].strip()
+    return raw
+
+
+def _zhihu_headers(with_cookie: bool) -> dict[str, str]:
+    headers = {
+        **BROWSER_HEADERS,
+        "Referer": "https://www.zhihu.com/",
+        "x-requested-with": "fetch",
+    }
+    zc0 = _zhihu_cookie_value() if with_cookie else ""
+    if zc0:
+        headers["Cookie"] = f"z_c0={zc0}"
+    return headers
+
+
+def _zhihu_answer_line(answer: dict[str, Any]) -> tuple[int, str, str]:
+    """从一条回答里取（赞同数, 作者, 文本）。取不到返回 (0, "", "")。"""
+    votes = answer.get("voteup_count")
+    try:
+        votes = int(votes or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    author = ((answer.get("author") or {}).get("name") or "").strip()
+    text = _clean_text(
+        answer.get("excerpt") or answer.get("content") or "", 320
+    )
+    return votes, author, text
+
+
+def _fetch_zhihu_answers(qid: str, limit: int, timeout: int) -> list[dict[str, Any]]:
+    """取一个问题下的高赞回答。调用方保证已经确认有 cookie。"""
+    try:
+        response = requests.get(
+            f"https://www.zhihu.com/api/v4/questions/{qid}/answers",
+            params={"limit": max(1, limit), "sort_by": "default", "include": "voteup_count"},
+            headers=_zhihu_headers(True),
+            timeout=timeout,
+        )
+        if response.status_code in (401, 403):
+            return []
+        response.raise_for_status()
+        return response.json().get("data") or []
+    except (requests.RequestException, ValueError, AttributeError):
+        return []
+
+
+def _fetch_zhihu_via_search(
+    limit: int, timeout: int
+) -> tuple[list[dict[str, Any]], str]:
+    """有 cookie：用 search_v3 搜问题，再取每个问题的高赞回答。
+
+    返回 (条目, 失败原因)。失败原因非空时调用方可以据此决定是否降级。
+    """
+    result: list[dict[str, Any]] = []
+    seen_qid: set[str] = set()
+    keywords = list(getattr(config, "ZHIHU_QA_KEYWORDS", []) or [])[:3]
+    if not keywords:
+        return result, "未配置 ZHIHU_QA_KEYWORDS"
+
+    answer_limit = max(1, int(getattr(config, "ZHIHU_QA_ANSWERS", 2)))
+    auth_failed = False
+    for keyword in keywords:
+        try:
+            response = requests.get(
+                "https://www.zhihu.com/api/v4/search_v3",
+                params={"t": "general", "q": keyword, "correction": 1, "offset": 0, "limit": 20},
+                headers=_zhihu_headers(True),
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            print(f"  知乎问答·搜索失败({keyword}): {exc}")
+            continue
+        if response.status_code in (401, 403):
+            auth_failed = True
+            break
+        try:
+            rows = response.json().get("data") or []
+        except ValueError:
+            continue
+
+        for row in rows:
+            obj = row.get("object") or {}
+            if obj.get("type") not in (None, "answer"):
+                continue
+            question = obj.get("question") or {}
+            qid = str(question.get("id") or "").strip()
+            qtitle = _clean_text(question.get("name") or "", 160)
+            if not qid or not qtitle or qid in seen_qid:
+                continue
+            seen_qid.add(qid)
+
+            answers = _fetch_zhihu_answers(qid, answer_limit, timeout)
+            parts: list[str] = []
+            votes_total = 0
+            # 搜索里自带的那条回答也算一条（就是命中的高赞）
+            inline_votes, inline_author, inline_text = _zhihu_answer_line(obj)
+            if inline_text:
+                votes_total += inline_votes
+                parts.append(
+                    f"高赞回答（{inline_votes} 赞同"
+                    + (f"，作者 {inline_author}" if inline_author else "")
+                    + f"）：{inline_text}"
+                )
+            for answer in answers[:answer_limit]:
+                votes, author, text = _zhihu_answer_line(answer)
+                if not text:
+                    continue
+                votes_total += votes
+                parts.append(
+                    f"高赞回答（{votes} 赞同"
+                    + (f"，作者 {author}" if author else "")
+                    + f"）：{text}"
+                )
+            if not parts:
+                continue
+            result.append({
+                "title": qtitle,
+                "desc": "\n".join(parts),
+                "url": f"https://www.zhihu.com/question/{qid}",
+                "hot": votes_total,
+                "source": "知乎问答",
+                # 标明这是真回答，提示词里可以引用"回答者自述"
+                "zhihu_kind": "answer",
+            })
+            if len(result) >= limit:
+                return result, ""
+        if len(result) >= limit:
+            break
+    return result, ("知乎登录态失效（401/403）" if auth_failed else "")
+
+
+def _zhihu_snippet_ok(title: str, desc: str) -> bool:
+    """搜索结果摘要能不能当素材用。
+
+    实测必应搜 site:zhihu.com 命中的知乎内容里，有一半是卖课引流文：
+    "月入过万""日入 50+""不卖课不割韭菜，建议先收藏"——这类摘要要么是
+    收益承诺，要么纯属总结套话，拿来写稿只会把号写成鸡汤号。
+    这里直接剔掉，宁可少一条也不要脏素材。
+    """
+    spam = (
+        "月入过万", "日入", "轻松月入", "躺赚", "割韭菜", "不卖课", "不收学费",
+        "加微信", "私信我", "训练营", "课程报名", "代理加盟", "带你",
+    )
+    hollow = (
+        "以上就是", "总的来说", "希望对你有帮助", "建议先收藏", "码字不易",
+        "点赞支持", "欢迎关注", "关注我",
+    )
+    text = f"{title} {desc}"
+    if any(w in text for w in spam):
+        return False
+    # 套话只在摘要开头出现时判死：正文中段顺带一句"总的来说"不算违规
+    head = desc[:60]
+    if any(w in head for w in hollow):
+        return False
+    return True
+
+
+def _fetch_zhihu_via_bing(limit: int, timeout: int) -> list[dict[str, Any]]:
+    """无 cookie 降级：必应 RSS 搜 site:zhihu.com，拿问题/专栏标题 + 搜索摘要。
+
+    这不是"高赞回答"——知乎问题页对无登录态返回 403，我们只能拿到搜索引擎
+    存下的页面摘要。好处是它仍然是"读者真实在问的问题"，比同行公众号的
+    二手标题贴题；所以 source 明确写成「知乎搜索」，不冒充回答。
+    """
+    from html import unescape
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    min_desc = max(0, int(getattr(config, "ZHIHU_QA_MIN_DESC", 50)))
+    keywords = list(getattr(config, "ZHIHU_QA_KEYWORDS", []) or [])[:3]
+    for keyword in keywords:
+        try:
+            response = requests.get(
+                "https://cn.bing.com/search",
+                params={"q": f"site:zhihu.com {keyword}", "format": "rss"},
+                headers={
+                    "User-Agent": BROWSER_HEADERS["User-Agent"],
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                },
+                timeout=timeout,
+            )
+            if response.status_code != 200:
+                continue
+        except requests.RequestException as exc:
+            print(f"  知乎搜索降级失败({keyword}): {exc}")
+            continue
+
+        for item in re.findall(r"<item>(.*?)</item>", response.text, re.S):
+            link_match = re.search(r"<link>(.*?)</link>", item, re.S)
+            title_match = re.search(r"<title>(.*?)</title>", item, re.S)
+            desc_match = re.search(r"<description>(.*?)</description>", item, re.S)
+            link = unescape((link_match.group(1) if link_match else "").strip())
+            if "zhihu.com" not in link:
+                continue
+            title = _clean_text(unescape(title_match.group(1)) if title_match else "", 160)
+            # 必应标题尾巴统一带" - 知乎"
+            title = re.sub(r"\s*[-–—]\s*知乎\s*$", "", title).strip()
+            desc = _clean_text(
+                unescape(re.sub(r"<[^>]+>", " ", desc_match.group(1))) if desc_match else ""
+            )
+            if not title or len(desc) < min_desc:
+                continue
+            if not _zhihu_snippet_ok(title, desc):
+                continue
+            key = link.split("?")[0].rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            kind = "question" if "/question/" in link else "column"
+            result.append({
+                "title": title,
+                "desc": desc,
+                "url": link,
+                "hot": 0,
+                "source": "知乎搜索",
+                "zhihu_kind": kind,
+            })
+            if len(result) >= limit:
+                return result
+    return result
+
+
+def fetch_zhihu_qa(limit: int = 6, timeout: int = 14) -> list[dict[str, Any]]:
+    """知乎"问题型"素材源：优先抓高赞回答，无登录态时降级为搜索摘要。
+
+    为什么要这个源：副业栏原来的素材是同行公众号的标题 + 一句摘要，
+    读者要的却是"这件事到底能不能做、要投多少"。知乎问题的价值在于
+    它本身就是读者的真实提问，高赞回答里通常带具体做法和代价。
+
+    实测（2026-11-24）：知乎问题页/专栏页/搜索页无 cookie 一律 403，
+    search_v3 无 cookie 返回 401。所以有 cookie 走 API，没 cookie 走必应。
+    两条路径的 source 分开写，避免把"搜索摘要"当成"高赞回答"用。
+    """
+    if not getattr(config, "USE_ZHIHU_QA", True):
+        return []
+    has_cookie = bool(_zhihu_cookie_value())
+    if has_cookie:
+        rows, reason = _fetch_zhihu_via_search(limit, timeout)
+        if rows:
+            return rows
+        if reason:
+            print(f"  知乎问答：{reason}，本次降级为搜索摘要（请更新 ZHIHU_COOKIE）")
+        else:
+            print("  知乎问答：有 cookie 但没搜到可用问题，降级为搜索摘要")
+    rows = _fetch_zhihu_via_bing(limit, timeout)
+    # 问题页优先于专栏：问题页的搜索摘要通常是某个回答的片段（接近"高赞回答"），
+    # 专栏页多是作者自己写的引流长文，信息密度反而低。
+    rows.sort(key=lambda r: 0 if r.get("zhihu_kind") == "question" else 1)
+    return rows
+
+
 def fetch_kuaishou(limit: int = 20, timeout: int = 8) -> list[dict[str, Any]]:
     """抓快手热榜（GraphQL，只有标题和热度，没有摘要）。
 

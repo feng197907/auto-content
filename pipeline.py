@@ -472,6 +472,11 @@ def _sidebiz_block(item: dict[str, Any]) -> str:
     rule = getattr(config, "SIDE_BIZ_DATA_RULE", "")
     if not rule:
         return ""
+    # 知乎来源额外加"第三方自述"约束：回答里的收益数字最容易被直接搬走，
+    # 一旦搬进正文或标题，就等于我们替别人做收益承诺。
+    zhihu_note = ""
+    if item.get("zhihu_kind"):
+        zhihu_note = "\n" + str(getattr(config, "ZHIHU_QA_RULE", "")) + "\n"
     desc = str(item.get("desc") or "")
     if not _sidebiz_has_data(item):
         # 素材里连一个带单位的数字都没有，先告诉模型"没有"，比让它自由发挥安全
@@ -487,8 +492,9 @@ def _sidebiz_block(item: dict[str, Any]) -> str:
             "**正文里不许出现任何金额数字（元、块、万、亿）**，"
             "时间、次数、单量可以写；需要谈钱时只写「单价与结算方式以平台当前规则为准」，"
             "不要给具体数字。\n"
+            + zhihu_note
         )
-    return rule + "\n"
+    return rule + "\n" + zhihu_note
 
 
 def _translation_block(item: dict[str, Any]) -> str:
@@ -696,6 +702,17 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
     #    只有一句感慨的排后面——不然它占了名额，写出来必然是空话。
     biz_quota = max(0, int(quotas.get("ai_sidebiz", 0)))
     if biz_quota > 0:
+        # 2a. 知乎问答：读者真实在问的问题 + 高赞回答（有 cookie）；
+        #     没有登录态时自动降级成知乎搜索摘要（source 标「知乎搜索」，
+        #     不冒充回答）。这类素材比同行公众号稿贴题得多，所以排最前。
+        zhihu_biz: list[dict[str, Any]] = []
+        if getattr(config, "USE_ZHIHU_QA", True):
+            try:
+                zhihu_biz = hot_topics.fetch_zhihu_qa(max(biz_quota * 3, 6))
+            except Exception as exc:  # noqa: BLE001
+                print(f"  副业栏·知乎问答抓取失败：{exc}")
+            zhihu_biz.sort(key=_sidebiz_material_score, reverse=True)
+
         hot_biz: list[dict[str, Any]] = []
         wechat_biz: list[dict[str, Any]] = []
         try:
@@ -780,9 +797,9 @@ def fetch_scheduled_items(quotas: dict[str, int]) -> list[dict[str, Any]]:
         biz_fallback = [{"title": t, "source": "副业词库", "hot": 0} for t in fresh]
 
         if getattr(config, "SIDE_BIZ_WECHAT_AS_FALLBACK", True):
-            biz_pool = primary_biz + wechat_biz + biz_fallback
+            biz_pool = zhihu_biz + primary_biz + wechat_biz + biz_fallback
         else:  # 旧顺序，留开关方便回滚
-            biz_pool = wechat_biz + primary_biz + biz_fallback
+            biz_pool = wechat_biz + zhihu_biz + primary_biz + biz_fallback
         # 前 biz_quota 条一条素材都没有时把话说在前头：这几篇只能给口径、给不了数字。
         # 2026-11-24 实测就是这个状态——搜狗微信被墙（返回空）、热榜无一命中副业词，
         # 副业栏 100% 掉到兜底词库。日志里写清，免得事后以为是提示词没生效。
