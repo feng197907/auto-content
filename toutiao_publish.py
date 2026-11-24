@@ -47,6 +47,8 @@ LOGIN_PROBE_URL = f"{TT_BASE}/mp/agw/media/get_media_info"
 PROFILE_DIR = ROOT / "data" / "toutiao_profile"
 STATE_FILE = ROOT / "data" / "toutiao_state.json"
 QR_FILE = ROOT / "data" / "toutiao_qr.png"
+# 本地登录导出的明文登录态（storage_state），跨平台注入，绕开 Windows DPAPI 加密
+COOKIES_FILE = ROOT / "data" / "toutiao_cookies.json"
 
 # 登录任务状态（进程内，够用；服务重启归零无副作用）
 login_state: dict[str, Any] = {"status": "idle", "message": "", "qr": False, "at": 0}
@@ -102,6 +104,51 @@ def configured() -> bool:
 def clear_verify_cache() -> None:
     """登录态变更后手动清缓存（本地登录态搬上服务器后调用）。"""
     _verify_cache.update({"at": 0, "result": False})
+
+
+def _inject_cookies(ctx: Any, cookies_file: Path) -> None:
+    """把本地导出的 storage_state cookie 注入浏览器上下文（跨平台迁移登录态）。
+
+    Windows 上 Edge/Chrome 的 cookie 被 DPAPI 加密，整个 profile 目录搬到
+    Linux 会解不开。storage_state(JSON) 是明文，用 add_cookies 注入即可复用。
+    """
+    if not cookies_file.exists():
+        return
+    try:
+        import json as _json
+
+        data = _json.loads(cookies_file.read_text(encoding="utf-8"))
+        cookies = data.get("cookies", []) if isinstance(data, dict) else []
+        if not cookies:
+            return
+        plain = []
+        for c in cookies:
+            domain = str(c.get("domain", "")).lstrip(".")
+            path = c.get("path", "/") or "/"
+            if not domain or not c.get("name"):
+                continue
+            # add_cookies 要求 url/domain 二选一，不能同时给（同时给会静默失败）
+            item = {
+                "name": c.get("name", ""),
+                "value": c.get("value", ""),
+                "domain": domain,
+                "path": path,
+            }
+            if c.get("expires") is not None and c.get("expires", -1) > 0:
+                item["expires"] = c["expires"]
+            if c.get("httpOnly") is not None:
+                item["httpOnly"] = bool(c["httpOnly"])
+            if c.get("secure") is not None:
+                item["secure"] = bool(c["secure"])
+            if c.get("sameSite"):
+                ss = str(c["sameSite"]).lower()
+                if ss in ("lax", "strict", "none"):
+                    item["sameSite"] = ss.capitalize() if ss != "none" else "None"
+            plain.append(item)
+        if plain:
+            ctx.add_cookies(plain)
+    except Exception:  # noqa: BLE001
+        pass  # 注入失败不阻断启动，configured() 实测会如实判定未登录
 
 
 def playwright_ready() -> bool:
@@ -161,7 +208,11 @@ class ToutiaoPublisher:
         # RHEL 系用 dnf 装的系统 Chromium；探测到就显式指定，绕开自带包缺库的问题
         if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
             kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
-        return pw.chromium.launch_persistent_context(**kwargs)
+        ctx = pw.chromium.launch_persistent_context(**kwargs)
+        # 注入本地导出的明文登录态：Windows Edge 的 profile 目录搬到 Linux 会因
+        # DPAPI 加密丢 cookie，所以改用 storage_state JSON + add_cookies 注入。
+        _inject_cookies(ctx, COOKIES_FILE)
+        return ctx
 
     def check_login(self) -> bool:
         """打开 profile 检查登录态：能进创作后台即算已登录。"""

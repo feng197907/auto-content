@@ -48,6 +48,8 @@ LOGIN_URL = f"{BJ_BASE}/builder/theme/bjh/login"
 PROFILE_DIR = ROOT / "data" / "baijia_profile"
 STATE_FILE = ROOT / "data" / "baijia_state.json"
 QR_FILE = ROOT / "data" / "baijia_qr.png"
+# 本地登录导出的明文登录态（storage_state），跨平台注入，绕开 Windows DPAPI 加密
+COOKIES_FILE = ROOT / "data" / "baijia_cookies.json"
 
 # 登录任务状态（进程内）
 login_state: dict[str, Any] = {"status": "idle", "message": "", "qr": False, "at": 0}
@@ -124,6 +126,47 @@ def clear_verify_cache() -> None:
     _verify_cache.update({"at": 0, "result": False})
 
 
+def _inject_cookies(ctx: Any, cookies_file: Path) -> None:
+    """把本地导出的 storage_state cookie 注入浏览器上下文（跨平台迁移登录态）。"""
+    if not cookies_file.exists():
+        return
+    try:
+        import json as _json
+
+        data = _json.loads(cookies_file.read_text(encoding="utf-8"))
+        cookies = data.get("cookies", []) if isinstance(data, dict) else []
+        if not cookies:
+            return
+        plain = []
+        for c in cookies:
+            domain = str(c.get("domain", "")).lstrip(".")
+            path = c.get("path", "/") or "/"
+            if not domain or not c.get("name"):
+                continue
+            # add_cookies 要求 url/domain 二选一，不能同时给（同时给会静默失败）
+            item = {
+                "name": c.get("name", ""),
+                "value": c.get("value", ""),
+                "domain": domain,
+                "path": path,
+            }
+            if c.get("expires") is not None and c.get("expires", -1) > 0:
+                item["expires"] = c["expires"]
+            if c.get("httpOnly") is not None:
+                item["httpOnly"] = bool(c["httpOnly"])
+            if c.get("secure") is not None:
+                item["secure"] = bool(c["secure"])
+            if c.get("sameSite"):
+                ss = str(c["sameSite"]).lower()
+                if ss in ("lax", "strict", "none"):
+                    item["sameSite"] = ss.capitalize() if ss != "none" else "None"
+            plain.append(item)
+        if plain:
+            ctx.add_cookies(plain)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def playwright_ready() -> bool:
     try:
         import playwright  # noqa: F401
@@ -165,7 +208,10 @@ class BaijiaPublisher:
         # 与头条共用同一套浏览器探测：RHEL 系走 dnf 装的系统 Chromium
         if getattr(config, "BROWSER_EXECUTABLE_PATH", ""):
             kwargs["executable_path"] = config.BROWSER_EXECUTABLE_PATH
-        return pw.chromium.launch_persistent_context(**kwargs)
+        ctx = pw.chromium.launch_persistent_context(**kwargs)
+        # 注入本地导出的明文登录态（同头条，绕开 DPAPI 加密）
+        _inject_cookies(ctx, COOKIES_FILE)
+        return ctx
 
     def check_login(self) -> bool:
         if not playwright_ready():
