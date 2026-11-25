@@ -497,6 +497,21 @@ def _sidebiz_block(item: dict[str, Any]) -> str:
     return rule + "\n" + zhihu_note
 
 
+def _news_practical_block(item: dict[str, Any]) -> str:
+    """早报栏的算账/实战要求；副业稿与 GitHub 专栏返回空串。
+
+    早报与副业虽然都要"算账"，算的却不是一回事：
+      早报——这条新闻改变了什么条件、读者该怎么用/怎么避；
+      副业——这个项目要投多少、多久见钱。
+    两套规则按 classify_column 严格分流，避免早报被写成副业教程。
+    """
+    if not getattr(config, "NEWS_PRACTICAL_MODE", True):
+        return ""
+    if classify_column(item) != "ai_news":
+        return ""
+    return "\n" + str(getattr(config, "NEWS_PRACTICAL_RULE", "")) + "\n"
+
+
 def _translation_block(item: dict[str, Any]) -> str:
     """英文素材的翻译与本地化要求；中文素材返回空串。
 
@@ -1270,12 +1285,16 @@ def build_prompt(item: dict[str, Any]) -> str:
 
     grade = material_grade(desc)
     low, high = config.ARTICLE_WORDS[grade]
-    # 副业稿走自己的标题规则与数字要求；早报继续用 TITLE_RULE。
-    # 判据统一用 classify_column，跟审核页栏目筛选、队列 column 字段是同一套，
-    # 不另起一套判断，避免"页面归副业、提示词按早报写"这种串台。
+    # 三栏标题规则严格分流：副业算"投入产出"、早报算"新闻对普通人的影响"，
+    # GitHub 专栏上面已单独 return。判据统一用 classify_column，
+    # 跟审核页栏目筛选、队列 column 字段是同一套，避免串台。
     is_sidebiz = classify_column(item) == "ai_sidebiz"
+    is_news = classify_column(item) == "ai_news" and getattr(
+        config, "NEWS_PRACTICAL_MODE", True
+    )
     title_rule = (
         getattr(config, "SIDE_BIZ_TITLE_RULE", config.TITLE_RULE) if is_sidebiz
+        else getattr(config, "NEWS_PRACTICAL_TITLE_RULE", config.TITLE_RULE) if is_news
         else config.TITLE_RULE
     )
     length_rule = (
@@ -1297,7 +1316,11 @@ def build_prompt(item: dict[str, Any]) -> str:
                 "\n（素材偏短，事件本身的信息就这么多。"
                 "把篇幅放在机制解释、判断标准和操作路径上，不要替素材补经过。）"
             )
-    task = "请围绕下面的真实话题写一篇解读文章。"
+    task = (
+        "请把这条新闻翻译成对普通人的影响与可执行判断，不要写成新闻播报。"
+        if is_news
+        else "请围绕下面的真实话题写一篇解读文章。"
+    )
 
     source_line = f"\n原文链接：{url}" if url else ""
     # 英文源显式标成"英文原文标题"，否则模型会把它当成品名照抄进标题
@@ -1310,6 +1333,7 @@ def build_prompt(item: dict[str, Any]) -> str:
         f"{profile_mod.prompt_block()}\n"
         f"{_translation_block(item)}\n"
         f"{_sidebiz_block(item)}"
+        f"{_news_practical_block(item)}"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1373,18 +1397,27 @@ def build_optimize_prompt(
     source_line = f"\n原文链接：{url}" if url else ""
     low, high = config.ARTICLE_WORDS[material_grade(desc)]
     topic_label = "英文原文标题" if _is_english_material(article) else "话题"
-    # 副业稿优化时同样走副业规则：否则点一次"重写优化"，标题就被改回早报风格，
-    # 数字要求也一并丢掉。判据与生成、审核页筛选共用 classify_column。
+    # 重写优化同样按栏目分流：否则点一次"重写优化"，标题就被改回另一栏的风格。
+    # 判据与生成、审核页筛选共用 classify_column。
     is_sidebiz = classify_column(article) == "ai_sidebiz"
+    is_news = classify_column(article) == "ai_news" and getattr(
+        config, "NEWS_PRACTICAL_MODE", True
+    )
     title_rule = (
         getattr(config, "SIDE_BIZ_TITLE_RULE", config.TITLE_RULE) if is_sidebiz
+        else getattr(config, "NEWS_PRACTICAL_TITLE_RULE", config.TITLE_RULE) if is_news
         else config.TITLE_RULE
     )
     title_opt_line = (
         "1. 标题按上面的副业四公式重拟，比旧稿更具体："
         "给规模、给净额、给路径，不许写成劝退结论\n"
         if is_sidebiz
-        else "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
+        else (
+            "1. 标题按早报的算账/实战公式重拟：前半句保留新闻主体，"
+            "后半句必须给普通人的落点（信号/影响/账/动作），不许写成纯播报\n"
+            if is_news
+            else "1. 标题比旧稿更抓人但不夸张，20 字以内\n"
+        )
     )
 
     return (
@@ -1396,6 +1429,7 @@ def build_optimize_prompt(
         f"{profile_mod.prompt_block()}\n"
         f"{_translation_block(article)}\n"
         f"{_sidebiz_block(article)}"
+        f"{_news_practical_block(article)}"
         "真实性硬要求（必须遵守，违反即作废）：\n"
         "1. 只能使用上面提供的真实素材，不得编造任何具体数字、人名、机构名、"
         "时间、地点或事件细节\n"
@@ -1891,7 +1925,8 @@ def parse_response(raw: str, fallback_title: str) -> tuple[str, str]:
 
 
 def structure_issues(
-    body: str, title: str = "", desc: str = "", min_words: int = 0
+    body: str, title: str = "", desc: str = "", min_words: int = 0,
+    column: str = "",
 ) -> list[str]:
     """检查成稿是否符合结构模板，只报会毁掉可读性的硬伤。
 
@@ -1920,6 +1955,16 @@ def structure_issues(
             issues.append(f"标题 {len(clean_title)} 字，超过 22 字会被截断")
         if any(w in clean_title for w in ("揭秘", "震惊", "速看", "炸裂", "马上删", "惊呆")):
             issues.append("标题带了诱导词")
+        # 早报栏：拦"纯新闻播报"标题。用户 2026-11-25 明确要求停发这类稿——
+        # 大号已经写烂，小号跟发没有机会；同一条新闻必须换成对普通人的落点。
+        # 先把"影响几何"这类空话删掉再判，避免里面的"影响"二字冒充落点。
+        if column == "ai_news" and getattr(config, "NEWS_PRACTICAL_MODE", True):
+            probe = clean_title
+            for empty_word in getattr(config, "NEWS_PRACTICAL_EMPTY_LANDING", []):
+                probe = probe.replace(empty_word, "")
+            landing = getattr(config, "NEWS_PRACTICAL_LANDING_WORDS", [])
+            if landing and not any(w in probe for w in landing):
+                issues.append("早报标题是纯新闻播报，缺对普通人的落点（信号/影响/账/动作）")
 
     # 小标题：3 个左右，必须是陈述句
     heads = re.findall(r"<h2>(.*?)</h2>", body)
@@ -2036,8 +2081,17 @@ def structure_issues(
 
     # 标题里的数字必须能在素材或正文里找到，防止"1000 亿"被写成"100 亿"
     if title and desc:
-        title_nums = re.findall(r"\d+(?:\.\d+)?", title)
+        clean_title = strip_tags(title).strip()
+        title_nums = re.findall(r"\d+(?:\.\d+)?", clean_title)
         material_nums = set(re.findall(r"\d+(?:\.\d+)?", desc + " " + plain))
+        # 早报"3 个信号"是计数词：正文用 3 个小节或列表项表达，未必出现数字"3"。
+        # 数量对得上就算合法，不当成编数字；对不上仍按编数字驳回。
+        counted = re.findall(r"(\d+)\s*个(?:信号|影响|机会|变化|坑|点|条)", clean_title)
+        if counted:
+            n = counted[0]
+            shown = len(re.findall(r"<h2\b", body)) or len(re.findall(r"<li\b", body))
+            if shown == int(n):
+                title_nums = [x for x in title_nums if x != n]
         if any(n not in material_nums for n in title_nums):
             issues.append("标题里的数字与素材对不上")
 
@@ -2391,7 +2445,7 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
 
             # 结构不合格 / 内容空泛：共用这一次重写机会（只重试一次，控成本）。
             # content_advice 是建议不是硬伤，单独判断，不影响"结构合格"的结论。
-            issues = structure_issues(body, title, desc, min_words)
+            issues = structure_issues(body, title, desc, min_words, column=column)
             advice = content_advice(body, desc)
             if issues or advice:
                 reason = "结构自检未过" if issues else "内容增量不足"
@@ -2410,7 +2464,9 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
                     # 用「结构问题 + 内容建议」总数比，任一侧改善就采纳。
                     # 只比 issues 的话，纯内容建议（issues 为空）时新稿永远不会被采纳。
                     before_score = len(issues) + len(advice)
-                    after_score = len(structure_issues(body2, title2, desc, min_words)) + len(
+                    after_score = len(
+                        structure_issues(body2, title2, desc, min_words, column=column)
+                    ) + len(
                         content_advice(body2, desc)
                     )
                     if after_score < before_score:
@@ -2421,7 +2477,7 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
 
             # 重写一遍还是偏短：换扩写（同一判断、同一素材，只把每节讲透）
             # 先确认剩下的问题只有字数——结构还有硬伤时扩写只会放大毛病，直接交人工
-            remaining = structure_issues(body, title, desc, min_words)
+            remaining = structure_issues(body, title, desc, min_words, column=column)
             if word_count(body) < min_words and not has_hard_issue(remaining):
                 # 最多两次：第一次常因模型"顺手压缩"而变短，第二次带着每节字数再试
                 for _ in range(2):
@@ -2483,7 +2539,8 @@ def optimize_article(
     desc = (article.get("desc") or "").strip()
     min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
     issues = structure_issues(
-        article.get("body", ""), article.get("title", ""), desc, min_words
+        article.get("body", ""), article.get("title", ""), desc, min_words,
+        column=classify_column(article),
     )
     # 内容建议一并告诉模型，但不进 hard 判断——改不掉也允许写回，
     # 否则一篇结构合格、只是略空泛的稿子会被判死（2026-11-20 教训）。
@@ -2499,7 +2556,9 @@ def optimize_article(
             return None
 
         cand_title, cand_body = parse_response(raw, article.get("title", "优化稿件"))
-        left = structure_issues(cand_body, cand_title, desc, min_words)
+        left = structure_issues(
+            cand_body, cand_title, desc, min_words, column=classify_column(article)
+        )
         # 建议项不算硬伤：改不掉也允许写回，否则结构合格只是略空泛的稿子会被判死
         hard = [
             x for x in left
@@ -2553,14 +2612,21 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
             "标题里的数字只能来自下面的正文，正文没有就别写数字。"
         )
 
-    # 副业稿换标题时用副业的三公式（规模设问/算账/路径门槛），
-    # 不能用早报那套（具体信息点/反差/利益直给）——那套会把"劝退结论"
-    # 当成合法的反差标题放出来，正是副业稿打开率低的原因。
-    variants_rule = (
-        getattr(config, "SIDE_BIZ_TITLE_VARIANTS_RULE", config.TITLE_VARIANTS_RULE)
-        if classify_column(article) == "ai_sidebiz"
-        else config.TITLE_VARIANTS_RULE
-    )
+    # 三栏换标题各用各的公式，互不串台：
+    #   副业——规模设问/算账/路径门槛（不能用早报那套，否则"劝退结论"会被当反差标题放出来）
+    #   早报——信号盘点/算账/动作避坑，标题必须有对普通人的落点，不许纯播报
+    #   GitHub 专栏——沿用通用三公式
+    column = classify_column(article)
+    if column == "ai_sidebiz":
+        variants_rule = getattr(
+            config, "SIDE_BIZ_TITLE_VARIANTS_RULE", config.TITLE_VARIANTS_RULE
+        )
+    elif column == "ai_news" and getattr(config, "NEWS_PRACTICAL_MODE", True):
+        variants_rule = getattr(
+            config, "NEWS_PRACTICAL_TITLE_VARIANTS_RULE", config.TITLE_VARIANTS_RULE
+        )
+    else:
+        variants_rule = config.TITLE_VARIANTS_RULE
 
     return (
         "你是公众号标题编辑。任务只有一个：给同一篇文章拟 3 个不同角度的标题。\n"
@@ -2579,7 +2645,9 @@ def build_retitle_prompt(article: dict[str, Any]) -> str:
     )
 
 
-def _parse_title_candidates(raw: str, desc: str, body: str) -> list[str]:
+def _parse_title_candidates(
+    raw: str, desc: str, body: str, column: str = ""
+) -> list[str]:
     """从模型输出里拆出最多 3 个候选标题，逐个过校验。
 
     模型常犯：加「1.」编号、加引号、写成「标题：xxx」、三个候选其实换汤不换药、
@@ -2606,10 +2674,25 @@ def _parse_title_candidates(raw: str, desc: str, body: str) -> list[str]:
         # 长度：太短没信息，太长在分享卡片被截断
         if not (10 <= len(line) <= 24):
             continue
-        # 数字对账：素材/正文里找不到的数字不收
+        # 数字对账：素材/正文里找不到的数字不收。
+        # "3 个信号"是计数词，正文 h2/li 数量对得上就放行。
+        counted = re.findall(r"(\d+)\s*个(?:信号|影响|机会|变化|坑|点|条)", line)
         nums = re.findall(r"\d+(?:\.\d+)?", line)
+        if counted:
+            n = counted[0]
+            shown = len(re.findall(r"<h2\b", body)) or len(re.findall(r"<li\b", body))
+            if shown == int(n):
+                nums = [x for x in nums if x != n]
         if nums and not all(n in material_nums for n in nums):
             continue
+        # 早报换标题同样不许退回纯播报
+        if column == "ai_news" and getattr(config, "NEWS_PRACTICAL_MODE", True):
+            probe = line
+            for empty_word in getattr(config, "NEWS_PRACTICAL_EMPTY_LANDING", []):
+                probe = probe.replace(empty_word, "")
+            landing = getattr(config, "NEWS_PRACTICAL_LANDING_WORDS", [])
+            if landing and not any(w in probe for w in landing):
+                continue
         # 去重：模型爱把同一个标题换两个字再给一遍
         key = re.sub(r"\s|[，。！？、：；]", "", line)
         if key in seen:
@@ -2633,7 +2716,7 @@ def regenerate_titles(article: dict[str, Any]) -> list[str]:
         return []
     desc = (article.get("desc") or "").strip()
     body = article.get("body", "")
-    candidates = _parse_title_candidates(raw, desc, body)
+    candidates = _parse_title_candidates(raw, desc, body, classify_column(article))
     if not candidates:
         print(f"  换标题候选全部不合格，保留原标题：{raw[:80]}")
     return candidates
