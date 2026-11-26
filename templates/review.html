@@ -154,6 +154,11 @@
     .sticker-caption { font-size:13px; color:#4b5563; line-height:1.7; }
     .sticker-tags { font-size:13px; color:#7c5fbf; margin-top:8px; }
     .sticker-ph { padding:14px; text-align:center; color:var(--muted); font-size:13px; }
+    /* ---- 贴图预览弹窗（Canvas 渲染的纯文字金句卡片）---- */
+    .sticker-img-wrap { display:flex; justify-content:center; padding:4px 0 12px; }
+    .sticker-img-wrap canvas { max-width:100%; width:340px; height:auto;
+                 border-radius:10px; box-shadow:0 6px 22px rgba(46,42,74,.18); }
+    .sticker-actions { display:flex; gap:8px; justify-content:center; }
 
     /* ---- 弹窗：手机接近全屏 ---- */
     .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:50;
@@ -593,7 +598,10 @@
       {% endif %}
       <div class="cover-acts">
         <button onclick="genStickerCopy('{{ a.id }}', this)">{{ '换一条' if a.sticker_copy else '生成贴图文案' }}</button>
-        {% if a.sticker_copy %}<button onclick="copyStickerCopy('{{ a.id }}')">复制文案</button>{% endif %}
+        {% if a.sticker_copy %}
+        <button onclick="copyStickerCopy('{{ a.id }}')">复制文案</button>
+        <button onclick="genStickerImage('{{ a.id }}')">生成贴图</button>
+        {% endif %}
       </div>
     </div>
     {% endif %}
@@ -728,6 +736,26 @@
       <div class="copybox" id="copyBox" contenteditable="true"></div>
       <div style="margin-top:12px;display:flex;gap:8px;">
         <button class="primary wide" onclick="retryCopy()">再试一键复制</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 贴图预览弹窗：Canvas 渲染纯文字金句卡片，确认后下载 PNG -->
+<div class="modal" id="stickerImgModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>贴图预览 · 纯文字金句卡片</b>
+      <button onclick="closeStickerImgModal()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="sticker-img-wrap"><canvas id="stickerCanvas"></canvas></div>
+      <div class="sticker-actions">
+        <button class="primary wide" id="stickerDlBtn" onclick="downloadStickerImage()">下载 PNG</button>
+        <button class="ghost" onclick="genStickerImage(window._stickerCurId)">换配色</button>
+      </div>
+      <div class="hint" style="font-size:11px;color:var(--muted);margin-top:10px;text-align:center;">
+        1080 × 1440 竖版，纯文字渲染、字字准确。下载后到公众号「贴图」上传即可；配文和话题用「复制文案」单独粘贴。
       </div>
     </div>
   </div>
@@ -1489,6 +1517,112 @@ async function copyStickerCopy(id) {
   });
   const ok = await tryCopy(parts.filter(Boolean).join('\n\n'));
   toast(ok ? '文案已复制，去公众号贴图粘贴' : '复制失败，请手动选中文字');
+}
+
+/* ---- 纯文字金句贴图：浏览器 Canvas 渲染，字字准确，不依赖服务端 ---- */
+const STICKER_PALETTES = [
+  { bg:'#FAF9FE', ink:'#2E2A4A', line:'#B9A3E3' },  // 浅紫（默认，贴近用户示例）
+  { bg:'#FDFBF7', ink:'#262522', line:'#D9A441' },  // 米白暖金
+  { bg:'#1B2340', ink:'#F5F1E8', line:'#C9A96A' },  // 深蓝金（反差）
+  { bg:'#F2F8F4', ink:'#1F3D2B', line:'#7BAE8E' },  // 浅绿
+];
+window._stickerPaletteIdx = 0;
+
+function wrapStickerText(ctx, text, maxWidth) {
+  // 中文行首禁则：逗号句号等不能落在下一行开头，超宽也跟着上一行走。
+  const NO_LINE_START = '，。！？；：、,.!?;:）》」』】';
+  const lines = [];
+  let cur = '';
+  for (const ch of text) {
+    const test = cur + ch;
+    if (ctx.measureText(test).width > maxWidth && cur && NO_LINE_START.indexOf(ch) === -1) {
+      lines.push(cur);
+      cur = ch;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function drawSticker(quote) {
+  const canvas = document.getElementById('stickerCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = 1080, H = 1440;
+  canvas.width = W; canvas.height = H;
+  const pal = STICKER_PALETTES[window._stickerPaletteIdx];
+
+  // 背景
+  ctx.fillStyle = pal.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // 字号自适应：从 82px 往下试，控制在 6 行内、每行不超安全宽度
+  const safeW = W - 200;
+  let size = 82, lines = [];
+  for (; size >= 46; size -= 4) {
+    ctx.font = '700 ' + size + 'px "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
+    lines = wrapStickerText(ctx, quote, safeW);
+    if (lines.length <= 6) break;
+  }
+
+  // 垂直居中偏上：整体块高 = 行数 * 行高，金句落在中轴略上方
+  const lineH = size * 1.55;
+  const blockH = lines.length * lineH;
+  let y = (H - blockH) / 2 - 30;
+
+  ctx.fillStyle = pal.ink;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  lines.forEach(function (line) {
+    ctx.fillText(line, W / 2, y + lineH / 2);
+    y += lineH;
+  });
+
+  // 底部短下划线（最后一行的 36% 宽，居中），呼应示例的手绘一笔
+  const lastLineW = Math.min(ctx.measureText(lines[lines.length - 1]).width, safeW);
+  const ulW = Math.max(80, lastLineW * 0.36);
+  ctx.strokeStyle = pal.line;
+  ctx.lineWidth = 7;
+  ctx.lineCap = 'round';
+  const ulY = y - lineH * 0.05;
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - ulW / 2, ulY);
+  ctx.lineTo(W / 2 + ulW / 2, ulY);
+  ctx.stroke();
+}
+
+function genStickerImage(id) {
+  const box = document.getElementById('sticker-' + id);
+  if (!box) { toast('找不到这张卡片的文案'); return; }
+  const quoteEl = box.querySelector('.sticker-quote');
+  const quote = quoteEl ? quoteEl.textContent.trim() : '';
+  if (!quote) { toast('请先生成贴图文案'); return; }
+  window._stickerCurId = id;
+  window._stickerCurQuote = quote;
+  try {
+    drawSticker(quote);
+    document.getElementById('stickerImgModal').classList.add('show');
+  } catch (e) {
+    toast('渲染失败：' + e);
+  }
+}
+
+function closeStickerImgModal() {
+  document.getElementById('stickerImgModal').classList.remove('show');
+}
+document.getElementById('stickerImgModal').addEventListener('click', function (e) {
+  if (e.target === this) closeStickerImgModal();
+});
+
+function downloadStickerImage() {
+  const canvas = document.getElementById('stickerCanvas');
+  if (!canvas || !canvas.width) { toast('请先生成贴图'); return; }
+  const link = document.createElement('a');
+  link.download = '贴图_' + (window._stickerCurId || '金句') + '.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+  toast('已下载 PNG，去公众号贴图上传');
 }
 
 async function genCover(id, btn) {  if (!btn) btn = event && event.target;
