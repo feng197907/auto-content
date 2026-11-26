@@ -752,7 +752,7 @@
       <div class="sticker-img-wrap"><canvas id="stickerCanvas"></canvas></div>
       <div class="sticker-actions">
         <button class="primary wide" id="stickerDlBtn" onclick="downloadStickerImage()">下载 PNG</button>
-        <button class="ghost" onclick="genStickerImage(window._stickerCurId)">换配色</button>
+        <button class="ghost" onclick="cycleStickerPalette()">换配色</button>
       </div>
       <div class="hint" style="font-size:11px;color:var(--muted);margin-top:10px;text-align:center;">
         1080 × 1440 竖版，纯文字渲染、字字准确。下载后到公众号「贴图」上传即可；配文和话题用「复制文案」单独粘贴。
@@ -1521,10 +1521,10 @@ async function copyStickerCopy(id) {
 
 /* ---- 纯文字金句贴图：浏览器 Canvas 渲染，字字准确，不依赖服务端 ---- */
 const STICKER_PALETTES = [
-  { bg:'#FAF9FE', ink:'#2E2A4A', line:'#B9A3E3' },  // 浅紫（默认，贴近用户示例）
-  { bg:'#FDFBF7', ink:'#262522', line:'#D9A441' },  // 米白暖金
-  { bg:'#1B2340', ink:'#F5F1E8', line:'#C9A96A' },  // 深蓝金（反差）
-  { bg:'#F2F8F4', ink:'#1F3D2B', line:'#7BAE8E' },  // 浅绿
+  { name:'浅紫', bg:'#FAF9FE', bg2:'#F0ECFA', ink:'#2E2A4A', line:'#B9A3E3', deco:'#D9C9F0' },
+  { name:'暖白', bg:'#FDFBF7', bg2:'#F5EFE3', ink:'#262522', line:'#D9A441', deco:'#EBD9B4' },
+  { name:'深蓝', bg:'#1B2340', bg2:'#2B3560', ink:'#F5F1E8', line:'#C9A96A', deco:'#4A5890' },
+  { name:'浅绿', bg:'#F2F8F4', bg2:'#E4F0E8', ink:'#1F3D2B', line:'#7BAE8E', deco:'#C6DFCE' },
 ];
 window._stickerPaletteIdx = 0;
 
@@ -1553,12 +1553,28 @@ function drawSticker(quote) {
   canvas.width = W; canvas.height = H;
   const pal = STICKER_PALETTES[window._stickerPaletteIdx];
 
-  // 背景
-  ctx.fillStyle = pal.bg;
+  // 1) 渐变背景：比纯色有层次，浅色/深色两套都通透
+  const grad = ctx.createLinearGradient(0, 0, W, H);
+  grad.addColorStop(0, pal.bg);
+  grad.addColorStop(1, pal.bg2);
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
-  // 字号自适应：从 82px 往下试，控制在 6 行内、每行不超安全宽度
-  const safeW = W - 200;
+  // 2) 装饰：左上大引号水印 + 四角小圆点 + 底部细线，营造"设计感"但不抢字
+  ctx.save();
+  ctx.globalAlpha = 0.13;
+  ctx.fillStyle = pal.line;
+  ctx.font = '700 300px Georgia,serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('“', 90, 70);
+  ctx.restore();
+  ctx.fillStyle = pal.deco;
+  [[96,470],[984,470],[96,1240],[984,1240]].forEach(function (p) {
+    ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // 3) 字号自适应：82px 起按 4px 递减，控制在 6 行内
+  const safeW = W - 220;
   let size = 82, lines = [];
   for (; size >= 46; size -= 4) {
     ctx.font = '700 ' + size + 'px "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
@@ -1566,11 +1582,10 @@ function drawSticker(quote) {
     if (lines.length <= 6) break;
   }
 
-  // 垂直居中偏上：整体块高 = 行数 * 行高，金句落在中轴略上方
+  // 4) 金句：垂直居中偏上，行距 1.55
   const lineH = size * 1.55;
   const blockH = lines.length * lineH;
-  let y = (H - blockH) / 2 - 30;
-
+  let y = (H - blockH) / 2 - 20;
   ctx.fillStyle = pal.ink;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1579,17 +1594,34 @@ function drawSticker(quote) {
     y += lineH;
   });
 
-  // 底部短下划线（最后一行的 36% 宽，居中），呼应示例的手绘一笔
+  // 5) 手绘感下划线：两笔错位的短线，呼应示例里那一笔
   const lastLineW = Math.min(ctx.measureText(lines[lines.length - 1]).width, safeW);
-  const ulW = Math.max(80, lastLineW * 0.36);
+  const ulW = Math.max(80, lastLineW * 0.38);
+  const ulY = y - lineH * 0.02;
   ctx.strokeStyle = pal.line;
   ctx.lineWidth = 7;
   ctx.lineCap = 'round';
-  const ulY = y - lineH * 0.05;
   ctx.beginPath();
   ctx.moveTo(W / 2 - ulW / 2, ulY);
   ctx.lineTo(W / 2 + ulW / 2, ulY);
   ctx.stroke();
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - ulW / 2 + 10, ulY + 12);
+  ctx.lineTo(W / 2 + ulW / 2 - 14, ulY + 9);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // 6) 底部装饰带：短横线 + 三颗小星点，收住画面重心
+  const baseY = H - 130;
+  ctx.strokeStyle = pal.deco;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(W/2 - 70, baseY); ctx.lineTo(W/2 + 70, baseY); ctx.stroke();
+  ctx.fillStyle = pal.deco;
+  [-24, 0, 24].forEach(function (dx) {
+    ctx.beginPath(); ctx.arc(W/2 + dx, baseY + 26, dx === 0 ? 5 : 3, 0, Math.PI * 2); ctx.fill();
+  });
 }
 
 function genStickerImage(id) {
@@ -1606,6 +1638,13 @@ function genStickerImage(id) {
   } catch (e) {
     toast('渲染失败：' + e);
   }
+}
+
+function cycleStickerPalette() {
+  if (!window._stickerCurQuote) { toast('请先生成贴图'); return; }
+  window._stickerPaletteIdx = (window._stickerPaletteIdx + 1) % STICKER_PALETTES.length;
+  drawSticker(window._stickerCurQuote);
+  toast('已切换配色：' + STICKER_PALETTES[window._stickerPaletteIdx].name);
 }
 
 function closeStickerImgModal() {
