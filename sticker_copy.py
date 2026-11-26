@@ -40,7 +40,9 @@ def _plain(text: Any, limit: int) -> str:
 
 def _clean_quote(text: str) -> str:
     """清洗金句：去前缀/引号，太长就截到最后一个逗号。"""
-    quote = _plain(text, 200).strip("\"'“”‘’「」『』《》.!！?？")
+    # 注意：末尾的问号/问号要保留——新规则允许设问式钩子（"…谁最先慌？"），
+    # strip 掉就把悬念磨平了。只清引号和句号类标点，不清 ?/？。
+    quote = _plain(text, 200).strip("\"'“”‘’「」『』《》.!！")
     quote = re.sub(r"^(金句|配文|标题|一句话)\s*[:：]?\s*", "", quote)
     if len(quote) > 34:
         clipped = quote[:34]
@@ -56,15 +58,25 @@ def _clean_quote(text: str) -> str:
 def _compose_ai(article: dict[str, Any]) -> dict[str, str] | None:
     """让文本模型提炼金句/配文/标签；任一步不可用返回 None 走降级。"""
     try:
-        from pipeline import call_ai
+        from pipeline import call_ai, classify_column
     except Exception as exc:  # noqa: BLE001 - 降级路径必须兜得住
         print(f"[sticker_copy] 无法调用文本模型，改用加粗句：{exc}")
         return None
 
+    # 配文第 4 步「关我什么事」按栏目分流：副业落到能不能上手/投多少/多久见钱，
+    # 早报与 github 工具稿落到对普通人工作生活的影响。判据跟取题、审核页共用
+    # classify_column，不另起一套，避免"页面归副业、文案写早报口吻"串台。
+    is_sidebiz = classify_column(article) == "ai_sidebiz"
+    column_hint = (
+        config.STICKER_COLUMN_HINT_SIDEBIZ
+        if is_sidebiz
+        else config.STICKER_COLUMN_HINT_NEWS
+    )
     prompt = config.STICKER_QUOTE_PROMPT.format(
         title=_plain(article.get("title"), 80),
         desc=_plain(article.get("desc"), 150) or "（无）",
         body=_plain(article.get("body"), 900) or "（无）",
+        column_hint=column_hint,
     )
     raw = call_ai(prompt)
     if not raw:
@@ -81,7 +93,9 @@ def _compose_ai(article: dict[str, Any]) -> dict[str, str] | None:
             tags = line.split("：", 1)[-1].strip()
     if not quote or len(quote) < 10:
         return None
-    return {"quote": quote, "caption": caption[:120], "tags": tags[:80]}
+    # 配文新规则要求 150-260 字（类比+事件+判断标准+关我什么事+互动提问），
+    # 旧的 120 字上限会把互动收尾那句切掉，放宽到 300 留余量。
+    return {"quote": quote, "caption": caption[:300], "tags": tags[:80]}
 
 
 def _compose_fallback(article: dict[str, Any]) -> dict[str, str]:
