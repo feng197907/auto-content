@@ -55,6 +55,35 @@ def _clean_quote(text: str) -> str:
     return quote.strip()
 
 
+# 主题锚点校验用的虚词表：这些 2 字词重合不算"沾边"。
+# 用户 2026-11-26 反馈：金句为了留悬念把主体也藏了，"光看标题不知道是干啥的"。
+_ANCHOR_STOPWORDS = {
+    "一个", "一种", "这个", "那个", "这些", "那些", "什么", "怎么", "我们", "你们",
+    "他们", "自己", "可以", "可能", "已经", "就是", "不是", "真的", "其实", "这样",
+    "那样", "很多", "没有", "还是", "但是", "因为", "所以", "如果", "虽然", "然后",
+    "开始", "知道", "看到", "觉得", "认为", "现在", "以后", "这次", "一次", "一直",
+    "一定", "所有", "每个", "第一", "最后", "这样", "那样", "为了", "作为",
+}
+
+
+def _has_topic_anchor(quote: str, article: dict[str, Any]) -> bool:
+    """金句是否与原文主题有实词重合；无重合就是悬空标题，看不出在说啥。
+
+    只拿标题+摘要做参照（正文太长，随便一个虚词都能撞上，校验就失效了）。
+    抽 2 字中文滑窗做词元，滤掉虚词；标题全英文时无法校验，放行不误伤。
+    """
+    source = _plain(article.get("title"), 100) + _plain(article.get("desc"), 150)
+    words = set()
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", source):
+        for i in range(len(chunk) - 1):
+            word = chunk[i : i + 2]
+            if word not in _ANCHOR_STOPWORDS:
+                words.add(word)
+    if not words:
+        return True
+    return any(word in quote for word in words)
+
+
 def _compose_ai(article: dict[str, Any]) -> dict[str, str] | None:
     """让文本模型提炼金句/配文/标签；任一步不可用返回 None 走降级。"""
     try:
@@ -82,6 +111,32 @@ def _compose_ai(article: dict[str, Any]) -> dict[str, str] | None:
     if not raw:
         return None
 
+    meta = _parse_three_lines(raw)
+    # 主题锚点兜底：提示词写了"第一硬约束"，但模型偶尔还是藏主体。
+    # 光看金句认不出在讲啥（跟标题/摘要零实词重合），追加指令重写一次；
+    # 重写还不行就返回 None 走降级——降级金句取正文加粗句/标题，天然带主体。
+    if meta and not _has_topic_anchor(meta["quote"], article):
+        print(f"[sticker_copy] 金句脱离原文主题，重写一次：{meta['quote']}")
+        fix_prompt = (
+            prompt
+            + "\n\n【重写】你上一版的金句没有带出这篇文章的主体，"
+            + "光看它看不出讲的是机器人/副业/哪个产品。请务必在金句里写进原文的具体名词，"
+            + "保留悬念但不要藏主体，其余按原格式三行输出。"
+        )
+        raw2 = call_ai(fix_prompt)
+        meta2 = _parse_three_lines(raw2) if raw2 else None
+        if meta2 and _has_topic_anchor(meta2["quote"], article):
+            meta = meta2
+        else:
+            print("[sticker_copy] 重写后仍无主题锚点，改用正文加粗句降级")
+            return None
+    if not meta:
+        return None
+    return meta
+
+
+def _parse_three_lines(raw: str) -> dict[str, str] | None:
+    """解析模型输出的三行（金句/配文/标签），不合规则返回 None。"""
     quote = caption = tags = ""
     for line in raw.strip().splitlines():
         line = line.strip()
