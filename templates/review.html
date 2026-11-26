@@ -146,6 +146,14 @@
                 display:flex; align-items:center; justify-content:center;
                 border:1px solid var(--line); border-radius:8px; background:#fff;
                 color:#1f2937; text-decoration:none; cursor:pointer; }
+    /* ---- 贴图文案：金句 + 配文 + 话题，纯文本一键复制 ---- */
+    .sticker-box { margin-top:14px; border:1px solid #e6ddf5; border-radius:10px;
+                   padding:12px; background:#fbfaff; }
+    .sticker-quote { font-size:19px; font-weight:700; color:#2e2a4a; line-height:1.55;
+                     padding:10px 0 8px; }
+    .sticker-caption { font-size:13px; color:#4b5563; line-height:1.7; }
+    .sticker-tags { font-size:13px; color:#7c5fbf; margin-top:8px; }
+    .sticker-ph { padding:14px; text-align:center; color:var(--muted); font-size:13px; }
 
     /* ---- 弹窗：手机接近全屏 ---- */
     .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:50;
@@ -566,6 +574,26 @@
       <div class="cover-acts">
         <button onclick="genCover('{{ a.id }}', this)">{{ '换一张' if a.cover else '生成头图' }}</button>
         {% if a.cover %}<a class="dl" data-src="/cover/{{ a.id }}{% if a.cover_at %}?v={{ a.cover_at }}{% endif %}" download="头图_{{ a.id }}.jpg">下载头图</a>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if a.status == 'approved' and sticker_enabled %}
+    <div class="sticker-box" id="sticker-{{ a.id }}">
+      <div class="cover-head">
+        <span>贴图文案 · 金句 + 配文 + 话题</span>
+        {% if a.sticker_copy %}<span>已生成，点「换一条」可重出</span>{% else %}<span>未生成</span>{% endif %}
+      </div>
+      {% if a.sticker_copy %}
+      <div class="sticker-quote">{{ a.sticker_copy.quote }}</div>
+      <div class="sticker-caption">{{ a.sticker_copy.caption }}</div>
+      <div class="sticker-tags">{{ a.sticker_copy.tags }}</div>
+      {% else %}
+      <div class="sticker-ph">还没有贴图文案，点下面「生成贴图文案」</div>
+      {% endif %}
+      <div class="cover-acts">
+        <button onclick="genStickerCopy('{{ a.id }}', this)">{{ '换一条' if a.sticker_copy else '生成贴图文案' }}</button>
+        {% if a.sticker_copy %}<button onclick="copyStickerCopy('{{ a.id }}')">复制文案</button>{% endif %}
       </div>
     </div>
     {% endif %}
@@ -1432,6 +1460,35 @@ function pollBaijiaDraft(id, btn, times, old) {
       pollBaijiaDraft(id, btn, times + 1, old);
     } catch (e) { pollBaijiaDraft(id, btn, times + 1, old); }
   }, 2000);
+}
+
+async function genStickerCopy(id, btn) {
+  const old = btn ? btn.textContent : '生成贴图文案';
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  try {
+    const r = await api('/sticker/' + id + '/copy', {});
+    if (!r.ok) {
+      toast(r.error || '生成失败');
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+      return;
+    }
+    toast('贴图文案已生成');
+    setTimeout(function () { location.reload(); }, 400);
+  } catch (e) {
+    toast('生成失败：' + e);
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+async function copyStickerCopy(id) {
+  const box = document.getElementById('sticker-' + id);
+  if (!box) return;
+  const parts = ['.sticker-quote', '.sticker-caption', '.sticker-tags'].map(function (sel) {
+    const el = box.querySelector(sel);
+    return el ? el.textContent.trim() : '';
+  });
+  const ok = await tryCopy(parts.filter(Boolean).join('\n\n'));
+  toast(ok ? '文案已复制，去公众号贴图粘贴' : '复制失败，请手动选中文字');
 }
 
 async function genCover(id, btn) {  if (!btn) btn = event && event.target;

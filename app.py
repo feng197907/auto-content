@@ -29,6 +29,7 @@ import analytics
 import profile as profile_mod
 import content_calendar
 import cover as cover_mod
+import sticker_copy as sticker_copy_mod
 import wechat
 import publish as publish_mod
 import notify as notifier
@@ -206,6 +207,8 @@ def index() -> str:
         checks = wechat.validate_source(body) + wechat.validate_html(wechat.to_wechat_html(body))
         row["fmt"] = wechat.summarize_issues(checks)
         row["tone"] = ai_tone_check(body)
+        # 贴图文案（金句/配文/话题）：只在渲染副本上带，不回写队列
+        row["sticker_copy"] = sticker_copy_mod.load_copy(item.get("id", ""))
         articles.append(row)
 
     # 日历：按日期分组 + 未来三周节日提醒（只展示与提醒，不改自动生成主链路）
@@ -231,6 +234,7 @@ def index() -> str:
         cal_suggestion=content_calendar.suggestion(),
         platforms=wechat.platform_list(),
         platform_metas={p: wechat.platform_meta(p) for p in wechat.platform_list()},
+        sticker_enabled=getattr(config, "USE_STICKER_COPY", True),
         toutiao_enabled=getattr(config, "TOUTIAO_ENABLED", True),
         toutiao_ready=toutiao_publish.playwright_ready(),
         toutiao_logged_in=toutiao_publish.configured(),
@@ -590,6 +594,21 @@ def cover_regenerate(article_id: str) -> Any:
     save_queue(queue)
     threading.Thread(target=_cover_worker, args=(article_id,), daemon=True).start()
     return jsonify({"ok": True})
+
+
+@app.route("/sticker/<article_id>/copy", methods=["POST"])
+def sticker_copy_generate(article_id: str) -> Any:
+    """从稿件提炼贴图文案（金句 + 配文 + 话题），返回可直接复制的纯文本。"""
+    if not getattr(config, "USE_STICKER_COPY", True):
+        return jsonify({"ok": False, "error": "贴图文案功能已关闭"}), 403
+    queue = load_queue()
+    index = find_article(queue, article_id)
+    if index == -1:
+        return jsonify({"ok": False, "error": "稿件不存在"}), 404
+    meta = sticker_copy_mod.generate_copy(queue[index], force=True)
+    if not meta:
+        return jsonify({"ok": False, "error": "文案生成失败"}), 500
+    return jsonify({"ok": True, **meta})
 
 
 @app.route("/publish/<article_id>", methods=["POST"])
