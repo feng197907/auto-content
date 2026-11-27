@@ -31,6 +31,7 @@ import content_calendar
 import cover as cover_mod
 import sticker_copy as sticker_copy_mod
 import topic_research
+import series as series_mod
 import wechat
 import publish as publish_mod
 import notify as notifier
@@ -251,6 +252,8 @@ def index() -> str:
         platforms=wechat.platform_list(),
         platform_metas={p: wechat.platform_meta(p) for p in wechat.platform_list()},
         sticker_enabled=getattr(config, "USE_STICKER_COPY", True),
+        series_enabled=getattr(config, "USE_SERIES", True),
+        series=series_mod.progress(),
         toutiao_enabled=getattr(config, "TOUTIAO_ENABLED", True),
         toutiao_ready=toutiao_publish.playwright_ready(),
         toutiao_logged_in=toutiao_publish.configured(),
@@ -452,6 +455,145 @@ def topic_generate() -> Any:
 def topic_status() -> Any:
     """话题投稿进度轮询。"""
     return jsonify(dict(topic_state))
+
+
+# ---- 副业连载系列（2026-11-28）----
+# 系列规划/成稿都要调 AI，走异步线程 + 复用 generate_lock 保护队列，
+# 状态独立字典，和批量生成/话题投稿互不覆盖。
+series_state: dict[str, Any] = {
+    "running": False, "action": "", "error": "", "stage": "", "episode_no": 0,
+}
+
+
+def _series_plan_worker(theme: str, total: int) -> None:
+    """后台线程：AI 规划系列大纲。"""
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+    series_state.update({
+        "running": True, "action": "plan", "error": "", "stage": "正在规划大纲",
+        "episode_no": 0,
+    })
+    try:
+        r = series_mod.plan_series(theme, total)
+        if r["ok"]:
+            series_state["stage"] = f"已规划 {len(r['series']['episodes'])} 期，可开始生成"
+        else:
+            series_state["error"] = r["error"]
+            series_state["stage"] = "规划失败"
+    except Exception as exc:  # noqa: BLE001
+        series_state["error"] = f"{type(exc).__name__}: {exc}"
+        series_state["stage"] = "出错了"
+        print(f"[series] 规划异常: {exc}", flush=True)
+    finally:
+        series_state["running"] = False
+        generate_lock.release()
+
+
+def _series_next_worker() -> None:
+    """后台线程：生成系列下一期。"""
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+    series_state.update({
+        "running": True, "action": "next", "error": "", "stage": "正在搜素材写稿",
+        "episode_no": 0,
+    })
+    try:
+        r = series_mod.generate_next(demo=not bool(config.AI_API_KEY))
+        if r["ok"]:
+            series_state["episode_no"] = r["episode_no"]
+            series_state["stage"] = f"第 {r['episode_no']} 期已成稿，已进待审核"
+        else:
+            series_state["error"] = r["error"]
+            series_state["stage"] = "生成失败"
+    except Exception as exc:  # noqa: BLE001
+        series_state["error"] = f"{type(exc).__name__}: {exc}"
+        series_state["stage"] = "出错了"
+        print(f"[series] 成稿异常: {exc}", flush=True)
+    finally:
+        series_state["running"] = False
+        generate_lock.release()
+
+
+@app.route("/series/plan", methods=["POST"])
+def series_plan() -> Any:
+    """创建系列：AI 一次规划大纲。异步，前端轮询 /series/status。"""
+    if not getattr(config, "USE_SERIES", True):
+        return jsonify({"ok": False, "error": "系列功能已关闭"}), 400
+    data = request.get_json(silent=True) or {}
+    theme = str(data.get("theme", "") or "").strip()[:80]
+    total = data.get("total", config.SERIES_TOTAL)
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        total = config.SERIES_TOTAL
+    if not generate_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "正在生成中，请稍候"}), 409
+    threading.Thread(
+        target=_series_plan_worker, args=(theme, total), daemon=True
+    ).start()
+    return jsonify({"ok": True, "started": True, "theme": theme, "total": total})
+
+
+@app.route("/series/next", methods=["POST"])
+def series_next() -> Any:
+    """生成系列下一期：搜素材+成稿+入队。异步。"""
+    if not getattr(config, "USE_SERIES", True):
+        return jsonify({"ok": False, "error": "系列功能已关闭"}), 400
+    if not generate_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "正在生成中，请稍候"}), 409
+    threading.Thread(target=_series_next_worker, daemon=True).start()
+    return jsonify({"ok": True, "started": True})
+
+
+@app.route("/series/status")
+def series_status() -> Any:
+    """系列操作进度 + 当前系列进度。"""
+    return jsonify({
+        "task": dict(series_state),
+        "progress": series_mod.progress(),
+    })
+
+
+@app.route("/series/episode/edit", methods=["POST"])
+def series_episode_edit() -> Any:
+    """编辑某一期的主题/角度/钩子（改大纲，不影响已完成稿）。"""
+    data = request.get_json(silent=True) or {}
+    no = data.get("no")
+    try:
+        no = int(no)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "期数不对"}), 400
+    plan = series_mod.load_plan()
+    series = plan.get("current")
+    if not series:
+        return jsonify({"ok": False, "error": "没有系列"}), 400
+    ep = next((e for e in series.get("episodes", []) if int(e.get("no", 0)) == no), None)
+    if not ep:
+        return jsonify({"ok": False, "error": "找不到这一期"}), 400
+    if ep.get("status") == "done":
+        return jsonify({"ok": False, "error": "已完成期不能改（稿已生成）"}), 400
+    for field in ("topic", "angle", "hook"):
+        if field in data and str(data[field]).strip():
+            ep[field] = str(data[field]).strip()[:120]
+    series_mod.save_plan(plan)
+    return jsonify({"ok": True})
+
+
+@app.route("/series/archive", methods=["POST"])
+def series_archive() -> Any:
+    """归档当前系列（写完后清空，可开新系列）。"""
+    plan = series_mod.load_plan()
+    if not plan.get("current"):
+        return jsonify({"ok": False, "error": "没有系列"}), 400
+    plan["history"].append(plan["current"])
+    plan["history"] = plan["history"][-5:]
+    plan["current"] = None
+    series_mod.save_plan(plan)
+    return jsonify({"ok": True})
 
 
 @app.route("/optimize", methods=["POST"])

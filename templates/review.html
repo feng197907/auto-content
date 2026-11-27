@@ -59,6 +59,42 @@
     .topic-status .ok { color:var(--ok); }
     .topic-status .err { color:var(--danger); }
 
+    /* ---- 副业连载系列面板 ---- */
+    details.series-box { background:var(--card); border:1px solid var(--line);
+             border-radius:12px; margin-bottom:14px; }
+    details.series-box > summary { padding:11px 14px; font-size:14px; font-weight:600;
+             cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px; }
+    details.series-box > summary::-webkit-details-marker { display:none; }
+    details.series-box > summary::after { content:'▾'; color:var(--muted); font-size:12px; margin-left:auto; }
+    .series-body { padding:0 14px 14px; }
+    .series-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+             flex-wrap:wrap; margin-bottom:8px; }
+    .series-title { font-size:15px; font-weight:600; }
+    .series-progress { font-size:12px; color:var(--muted); margin:6px 0 10px; }
+    .series-bar { height:8px; background:#eef2ff; border-radius:6px; overflow:hidden; margin:6px 0 10px; }
+    .series-bar > i { display:block; height:100%; background:var(--primary); border-radius:6px; }
+    .series-eps { list-style:none; padding:0; margin:0 0 10px; }
+    .series-eps li { display:flex; align-items:flex-start; gap:8px; padding:7px 0;
+             border-bottom:1px solid var(--line); font-size:13px; line-height:1.5; }
+    .series-eps li:last-child { border-bottom:none; }
+    .ep-no { flex:none; width:22px; height:22px; border-radius:50%; background:#eef2ff;
+             color:#3730a3; font-size:12px; font-weight:600; display:flex;
+             align-items:center; justify-content:center; }
+    .ep-no.done { background:var(--ok); color:#fff; }
+    .ep-main { flex:1; min-width:0; }
+    .ep-topic { font-weight:600; }
+    .ep-angle { color:var(--muted); font-size:12px; }
+    .ep-hook { color:#7c5fbf; font-size:12px; margin-top:2px; }
+    .ep-link { color:var(--primary); font-size:12px; text-decoration:none; }
+    .series-acts { display:flex; gap:8px; flex-wrap:wrap; }
+    .series-acts input { flex:1; min-width:150px; padding:9px 10px; border:1px solid var(--line);
+             border-radius:8px; font-size:16px; background:#fff; min-height:42px; }
+    .series-status { font-size:13px; color:var(--muted); padding-top:8px; line-height:1.6; }
+    .series-status .ok { color:var(--ok); }
+    .series-status .err { color:var(--danger); }
+    .ep-edit { font-size:12px; color:var(--primary); cursor:pointer; background:none;
+             border:none; padding:0 4px; min-height:auto; }
+
     button { padding:9px 14px; border:1px solid var(--line); border-radius:8px;
              background:#fff; cursor:pointer; font-size:14px; min-height:42px;
              touch-action:manipulation; }
@@ -517,6 +553,49 @@
     </div>
   </details>
 
+  {% if series_enabled %}
+  <details class="series-box" id="seriesBox" {% if series.exists %}open{% endif %}>
+    <summary>📚 AI副业工具测评 · 连载系列</summary>
+    <div class="series-body">
+      {% if series.exists %}
+      <div class="series-head">
+        <span class="series-title">{{ series.title }}</span>
+        <span class="series-progress">已更 {{ series.done }}/{{ series.total }} 期</span>
+      </div>
+      <div class="series-bar"><i style="width:{{ (series.done / series.total * 100) if series.total else 0 }}%"></i></div>
+      <ul class="series-eps">
+        {% for ep in series.episodes %}
+        <li>
+          <span class="ep-no {{ 'done' if ep.status == 'done' else '' }}">{{ ep.no }}</span>
+          <span class="ep-main">
+            <span class="ep-topic">{{ ep.topic }}</span>
+            <span class="ep-angle"> · {{ ep.angle }}</span>
+            {% if ep.hook %}<div class="ep-hook">↳ {{ ep.hook }}</div>{% endif %}
+            {% if ep.status == 'done' and ep.title %}
+              <div><a class="ep-link" href="/?status=all" title="成稿标题：{{ ep.title }}">✓ 已成稿：{{ ep.title }}</a></div>
+            {% elif ep.status == 'pending' %}
+              <button class="ep-edit" onclick="editEpisode({{ ep.no }})">改这期</button>
+            {% endif %}
+          </span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="series-acts">
+        <button class="primary" id="seriesNextBtn" onclick="genSeriesNext()">写下一期</button>
+        <button class="ghost" onclick="archiveSeries()">归档系列</button>
+      </div>
+      {% else %}
+      <div class="series-acts">
+        <input type="text" id="seriesTheme" maxlength="80"
+               placeholder="系列主题，如：普通人能上手的AI副业工具">
+        <button class="primary" id="seriesPlanBtn" onclick="createSeries()">规划系列</button>
+      </div>
+      {% endif %}
+      <div class="series-status" id="seriesStatus" style="display:none"></div>
+    </div>
+  </details>
+  {% endif %}
+
   <div class="tabs">
     <a href="/?status=pending{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'pending' else '' }}">待审核<span id="unreadBadge" class="dot-badge" {% if not unread_count %}style="display:none"{% endif %}>{{ unread_count }}</span></a>
     <a href="/?status=approved{% if column %}&column={{ column }}{% endif %}" class="{{ 'on' if current == 'approved' else '' }}">已通过</a>
@@ -974,6 +1053,106 @@ async function submitTopic() {
     btn.disabled = false; btn.textContent = '搜素材写稿';
     showTopicStatus('<span class="err">✗ 提交失败：' + e + '</span>');
   }
+}
+
+// ---- 副业连载系列 ----
+let seriesPolling = false;
+function showSeriesStatus(html) {
+  const box = document.getElementById('seriesStatus');
+  if (!box) return;
+  box.innerHTML = html; box.style.display = 'block';
+}
+async function pollSeries() {
+  try {
+    const res = await fetch(withPwd('/series/status'));
+    const st = await readJson(res);
+    const task = st.task || {};
+    if (task.running) {
+      showSeriesStatus('⏳ ' + (task.stage || '处理中') +
+        (task.episode_no ? '（第 ' + task.episode_no + ' 期）' : ''));
+      setTimeout(pollSeries, 2500);
+      return;
+    }
+    seriesPolling = false;
+    const planBtn = document.getElementById('seriesPlanBtn');
+    const nextBtn = document.getElementById('seriesNextBtn');
+    if (planBtn) planBtn.disabled = false;
+    if (nextBtn) nextBtn.disabled = false;
+    if (task.error) {
+      showSeriesStatus('<span class="err">✗ ' + task.error + '</span>');
+      toast('系列操作失败：' + task.error);
+    } else {
+      const pg = st.progress || {};
+      showSeriesStatus('<span class="ok">✓ ' + (task.stage || '已完成') +
+        '。当前 ' + (pg.done || 0) + '/' + (pg.total || 0) + ' 期，2 秒后刷新</span>');
+      toast('完成，正在刷新');
+      setTimeout(function () { location.reload(); }, 2000);
+    }
+  } catch (e) {
+    seriesPolling = false;
+    showSeriesStatus('<span class="err">查询状态失败：' + e + '</span>');
+  }
+}
+async function createSeries() {
+  const themeEl = document.getElementById('seriesTheme');
+  const theme = (themeEl ? themeEl.value : '').trim() || '普通人能上手的AI副业工具';
+  const btn = document.getElementById('seriesPlanBtn');
+  if (seriesPolling) { toast('已有系列操作在进行中'); return; }
+  btn.disabled = true; btn.textContent = '规划中…';
+  showSeriesStatus('⏳ 正在让 AI 规划大纲（10 期），可能要十几秒…');
+  try {
+    const r = await api('/series/plan', {theme: theme});
+    if (r.ok && r.started) {
+      seriesPolling = true;
+      setTimeout(pollSeries, 1500);
+    } else {
+      btn.disabled = false; btn.textContent = '规划系列';
+      showSeriesStatus('<span class="err">✗ ' + (r.error || '提交失败') + '</span>');
+    }
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '规划系列';
+    showSeriesStatus('<span class="err">✗ 提交失败：' + e + '</span>');
+  }
+}
+async function genSeriesNext() {
+  const btn = document.getElementById('seriesNextBtn');
+  if (seriesPolling) { toast('已有系列操作在进行中'); return; }
+  btn.disabled = true; btn.textContent = '写稿中…';
+  showSeriesStatus('⏳ 正在联网搜素材并写下一期…');
+  try {
+    const r = await api('/series/next', {});
+    if (r.ok && r.started) {
+      seriesPolling = true;
+      setTimeout(pollSeries, 1500);
+    } else {
+      btn.disabled = false; btn.textContent = '写下一期';
+      showSeriesStatus('<span class="err">✗ ' + (r.error || '提交失败') + '</span>');
+    }
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '写下一期';
+    showSeriesStatus('<span class="err">✗ 提交失败：' + e + '</span>');
+  }
+}
+async function archiveSeries() {
+  if (!confirm('归档当前系列？归档后可开新系列，已写稿件不受影响。')) return;
+  try {
+    const r = await api('/series/archive', {});
+    if (r.ok) { toast('已归档'); setTimeout(function () { location.reload(); }, 600); }
+    else { toast(r.error || '归档失败'); }
+  } catch (e) { toast('归档失败：' + e); }
+}
+async function editEpisode(no) {
+  const topic = prompt('第 ' + no + ' 期的主题（工具名/路子）：');
+  if (topic === null) return;
+  const angle = prompt('本期角度（如：能干什么/要花多少钱/新手能否上手）：');
+  if (angle === null) return;
+  const hook = prompt('下期钩子（一句话吊起好奇）：');
+  if (hook === null) return;
+  try {
+    const r = await api('/series/episode/edit', {no: no, topic: topic, angle: angle, hook: hook});
+    if (r.ok) { toast('已更新，刷新生效'); setTimeout(function () { location.reload(); }, 600); }
+    else { toast(r.error || '修改失败'); }
+  } catch (e) { toast('修改失败：' + e); }
 }
 
 async function pushNotify() {

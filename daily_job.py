@@ -23,8 +23,9 @@ from pipeline import build_daily_quotas, run as run_pipeline
 def daily(count: int | None = None, demo: bool = False) -> None:
     """执行一次每日任务。
 
-    count 不传时按三条内容线的每日配额生成（早报 5 + 副业 2，GitHub 到期当天 +1）；
-    显式传 --count 则退回旧的"按总量抓稿"，方便临时补稿。
+    count 不传时按三条内容线的每日配额生成（早报 5 + 副业 0，GitHub 到期当天 +1），
+    再自动更 1 期副业连载系列（2026-11-28 起副业散稿停发，改连载）；
+    显式传 --count 则退回旧的"按总量抓稿"，方便临时补稿（不动连载节奏）。
     """
     print("=== 每日任务开始 ===")
 
@@ -43,6 +44,21 @@ def daily(count: int | None = None, demo: bool = False) -> None:
         )
     created = run_pipeline(count=plan_count, demo=demo, quotas=quotas)
     print(f"  新增 {len(created)} 篇")
+
+    # 1.5 副业连载系列：每天自动生成下一期（散稿配额已归零，系列顶上）
+    # 只有显式按栏目配额跑（count 未指定）时才自动更系列；
+    # 临时 --count 补稿不动系列，避免打乱连载节奏。
+    if count is None and getattr(config, "USE_SERIES", True):
+        print(f"[1.5] 副业连载：生成 {getattr(config, 'SERIES_PER_DAY', 1)} 期")
+        import series as series_mod
+        for _ in range(max(1, int(getattr(config, "SERIES_PER_DAY", 1)))):
+            r = series_mod.generate_next(demo=demo)
+            if r["ok"]:
+                print(f"  第 {r['episode_no']} 期已成稿：{r['article'].get('title', '')}")
+            else:
+                # 没有系列 / 系列已写完不算错误，提示去审核页创建即可
+                print(f"  跳过：{r['error']}")
+                break
 
     # 2. 推送微信
     print("[2/2] 推送待审稿到微信")

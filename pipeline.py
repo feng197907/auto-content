@@ -2413,8 +2413,17 @@ def expand_article(
     return new_title, new_body
 
 
-def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
-    """生成一个稿件条目，记录真实来源，绝不编造正文。"""
+def make_article(
+    topic_item: dict[str, Any],
+    demo: bool,
+    prompt_override: str | None = None,
+) -> dict[str, Any]:
+    """生成一个稿件条目，记录真实来源，绝不编造正文。
+
+    prompt_override 供连载系列等复用：传了就用它替代 build_prompt，
+    但仍走后面完全相同的真实性校验/结构自检/扩写链路，质量不打折。
+    不传则行为与原来完全一致。
+    """
     topic = topic_item["title"]
     source = topic_item.get("source", "领域词库")
     url = topic_item.get("url", "")
@@ -2432,7 +2441,7 @@ def make_article(topic_item: dict[str, Any], demo: bool) -> dict[str, Any]:
             min_words = 1100
         else:
             min_words = config.ARTICLE_MIN_WORDS[material_grade(desc)]
-        prompt = build_prompt(topic_item)
+        prompt = prompt_override or build_prompt(topic_item)
         raw = call_ai(prompt)
         if raw is None:
             # AI 调用失败时，降级到事实卡，绝不退回假套话
