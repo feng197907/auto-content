@@ -562,6 +562,7 @@
         <span class="series-title">{{ series.title }}</span>
         <span class="series-progress">已更 {{ series.done }}/{{ series.total }} 期</span>
       </div>
+      <div class="series-progress">发布节奏：{{ series.schedule_text }} · 下次更新：{{ series.next_publish }}</div>
       <div class="series-bar"><i style="width:{{ (series.done / series.total * 100) if series.total else 0 }}%"></i></div>
       <ul class="series-eps">
         {% for ep in series.episodes %}
@@ -581,7 +582,7 @@
         {% endfor %}
       </ul>
       <div class="series-acts">
-        <button class="primary" id="seriesNextBtn" onclick="genSeriesNext()">写下一期</button>
+        <button class="primary" id="seriesNextBtn" onclick="genSeriesNext()" title="手动写稿不受发布日限制，随时可写">写下一期</button>
         <button class="ghost" onclick="archiveSeries()">归档系列</button>
       </div>
       {% else %}

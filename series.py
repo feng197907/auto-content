@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,56 @@ import topic_research
 
 ROOT = Path(__file__).resolve().parent
 SERIES_PATH = ROOT / config.SERIES_FILE
+
+_WEEK_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def publish_weekdays() -> list[int]:
+    """读取发布日配置，返回 Python weekday 列表（默认周二、周四）。"""
+    raw = str(getattr(config, "SERIES_PUBLISH_WEEKDAYS", "1,3") or "1,3")
+    days: list[int] = []
+    for part in raw.replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            day = int(part)
+        except ValueError:
+            continue
+        if 0 <= day <= 6 and day not in days:
+            days.append(day)
+    return sorted(days or [1, 3])
+
+
+def schedule_text() -> str:
+    """给审核页展示的发布节奏，如「每周二、周四更新」。"""
+    days = publish_weekdays()
+    return "每" + "、".join(_WEEK_CN[d] for d in days) + "更新"
+
+
+def next_publish_info(now: datetime | None = None) -> dict[str, str]:
+    """下一次发布日：返回中文星期、日期和展示文案。今天就是发布日时返回今天。"""
+    now = now or datetime.now()
+    today = now.date()
+    days = publish_weekdays()
+    for delta in range(8):
+        candidate = today + timedelta(days=delta)
+        if candidate.weekday() in days:
+            week = _WEEK_CN[candidate.weekday()]
+            prefix = "今天" if delta == 0 else ("明天" if delta == 1 else week)
+            return {
+                "weekday": week,
+                "date": candidate.isoformat(),
+                "label": f"{prefix}{week}（{candidate.month}月{candidate.day}日）",
+                # 文章末尾预告用短文案，避免「下次 明天周四（12月3日）更新」这种累赘
+                "short_label": f"{candidate.month}月{candidate.day}日（{week}）",
+            }
+    return {"weekday": "", "date": "", "label": "下次发布", "short_label": "下次发布"}
+
+
+def is_publish_day(now: datetime | None = None) -> bool:
+    """今天是不是自动发布日。"""
+    return (now or datetime.now()).weekday() in publish_weekdays()
 
 
 def _empty_plan() -> dict[str, Any]:
@@ -170,9 +220,11 @@ def _episode_prompt(series: dict[str, Any], ep: dict[str, Any]) -> str:
     prev = [e for e in episodes if int(e.get("no", 0)) < no and e.get("status") == "done"]
     prev_topics = "、".join(e.get("topic", "") for e in prev[-3:]) or "（无，这是开篇）"
     next_ep = next((e for e in episodes if int(e.get("no", 0)) == no + 1), None)
+    next_topic = next_ep.get("topic", "") if next_ep else "（本系列最后一期）"
     next_hook = ep.get("hook") or (
-        f"下期扒「{next_ep['topic']}」" if next_ep else "本系列完结，想看哪个方向留言告诉我们"
+        f"下期扒「{next_topic}」" if next_ep else "本系列完结，想看哪个方向留言告诉我们"
     )
+    next_publish = next_publish_info()["label"]
 
     # 素材（来自 topic_research 的汇总，措辞原样保留，喂给模型当真素材）
     desc = str(ep.get("_material", "") or "")
@@ -193,7 +245,9 @@ def _episode_prompt(series: dict[str, Any], ep: dict[str, Any]) -> str:
         episode_topic=ep.get("topic", ""),
         episode_angle=ep.get("angle", ""),
         prev_topics=prev_topics,
+        next_topic=next_topic,
         next_hook=next_hook,
+        next_publish=next_publish,
     )
     return structure + "\n" + base + "\n" + profile_mod.prompt_block()
 
@@ -231,6 +285,21 @@ def _compose_series_base(item: dict[str, Any]) -> str:
     )
 
 
+def _teaser_hook(hook: str, topic: str) -> str:
+    """去掉钩子里和「下期主题」重复的前缀，避免同一句里扒两遍同一个工具。"""
+    import re
+
+    text = re.sub(r"^下期(?:我们)?(?:就)?(?:扒|讲|聊|说|拆解)?[「\"']?", "", hook)
+    text = text.strip("」\"' ")
+    if topic and text:
+        n = 0
+        while n < min(len(topic), len(text)) and topic[n] == text[n]:
+            n += 1
+        if n >= 2:  # 有实词重合才算重复，单个「A」不算
+            text = text[n:].lstrip("，,、：: ")
+    return text.strip()
+
+
 def _wrap_episode_body(
     body: str, series: dict[str, Any], ep: dict[str, Any]
 ) -> str:
@@ -258,25 +327,49 @@ def _wrap_episode_body(
         )
 
     next_ep = next((e for e in eps if int(e.get("no", 0)) == no + 1), None)
+    publish = next_publish_info()["short_label"]
     hook = str(ep.get("hook", "") or "").strip()
-    if not hook:
-        hook = (
-            f"下期扒「{next_ep['topic']}」"
-            if next_ep else "本系列到这里就完结了，想看哪个方向留言告诉我们"
-        )
+    if next_ep:
+        # 必须点名下一期主题 + 悬念钩子 + 下次发布时间，读者才知道追什么、什么时候追
+        topic = str(next_ep.get("topic", "") or "").strip()
+        angle = str(next_ep.get("angle", "") or "").strip()
+        lead = f"下期我们就扒「{topic}」" + (f"，重点看{angle}" if angle else "") + "。"
+        hook = _teaser_hook(hook, topic)
+        tail = f"{lead}{hook + ' ' if hook else ''}下次 {publish} 更新，关注我，连载不迷路。"
+    else:
+        tail = f"{hook or '本系列到这里就完结了，想看哪个方向留言告诉我们'} 关注我，后面继续。"
     outro = (
-        f"<p><strong>下期预告：</strong>{hook} 关注我，连载不迷路。</p>"
+        f"<p><strong>下期预告：</strong>{tail}</p>"
     )
 
+    import re
+
     body = (body or "").strip()
+    # 模型可能在正文末尾自己写一段「下期预告」，剥掉后用上面的统一版本，
+    # 否则读者会看到两段预告、两个发布时间。
+    body = re.sub(
+        r"(?is)<p[^>]*>\s*(?:<strong>)?\s*下期预告\s*(?:：|:)?\s*(?:</strong>)?.*?</p>\s*$",
+        "", body,
+    ).strip()
     return intro + body + outro
 
 
-def generate_next(demo: bool = False) -> dict[str, Any]:
+def generate_next(demo: bool = False, force: bool = False) -> dict[str, Any]:
     """生成当前系列的下一期，入审核队列并标记完成。
 
-    返回 {"ok": bool, "article": dict|None, "error": str, "episode_no": int}
+    force=False（每日自动任务）：只在 {每周二、周四} 产出，其他日直接跳过；
+    force=True（审核页手动点「写下一期」）：随时可写，不受发布日限制。
+
+    返回 {"ok": bool, "article": dict|None, "error": str, "episode_no": int,
+          "skipped": bool}
     """
+    if not force and not is_publish_day():
+        return {
+            "ok": False, "article": None,
+            "error": f"今天不是发布日（{schedule_text()}），已跳过",
+            "episode_no": 0, "skipped": True,
+        }
+
     from pipeline import (
         call_ai, make_article, load_queue, save_queue, cleanup_queue,
         parse_response,
@@ -368,7 +461,9 @@ def progress() -> dict[str, Any]:
     series = plan.get("current")
     if not series:
         return {"exists": False, "title": "", "done": 0, "total": 0,
-                "next": None, "episodes": [], "id": ""}
+                "next": None, "episodes": [], "id": "",
+                "schedule_text": schedule_text(),
+                "next_publish": next_publish_info()["label"]}
     eps = series.get("episodes", [])
     done = sum(1 for e in eps if e.get("status") == "done")
     nxt = next((e for e in eps if e.get("status") == "pending"), None)
@@ -379,7 +474,15 @@ def progress() -> dict[str, Any]:
         "theme": series.get("theme", ""),
         "done": done,
         "total": len(eps),
-        "next": {"no": nxt.get("no"), "topic": nxt.get("topic", "")} if nxt else None,
+        "schedule_text": schedule_text(),
+        "next_publish": next_publish_info()["label"],
+        "next": {
+            "no": nxt.get("no"),
+            "topic": nxt.get("topic", ""),
+            "angle": nxt.get("angle", ""),
+            "hook": nxt.get("hook", ""),
+            "publish": next_publish_info()["label"],
+        } if nxt else None,
         "episodes": [
             {
                 "no": e.get("no"),

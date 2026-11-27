@@ -502,7 +502,8 @@ def _series_next_worker() -> None:
         "episode_no": 0,
     })
     try:
-        r = series_mod.generate_next(demo=not bool(config.AI_API_KEY))
+        # 手动点「写下一期」不受周二/周四自动发布日限制
+        r = series_mod.generate_next(demo=not bool(config.AI_API_KEY), force=True)
         if r["ok"]:
             series_state["episode_no"] = r["episode_no"]
             series_state["stage"] = f"第 {r['episode_no']} 期已成稿，已进待审核"
