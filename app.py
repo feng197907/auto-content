@@ -30,6 +30,7 @@ import profile as profile_mod
 import content_calendar
 import cover as cover_mod
 import sticker_copy as sticker_copy_mod
+import topic_research
 import wechat
 import publish as publish_mod
 import notify as notifier
@@ -66,6 +67,21 @@ generate_state: dict[str, Any] = {
     "stage": "",       # 当前阶段（抓取选题 / 正在写第 N 篇 / 收尾），让用户看到活着
     "started_at": "",  # ISO 时间，前端算已用时
     "column": "all",   # 本次生成的目标栏目，前端可显示
+}
+
+# 话题投稿的独立进度状态：和批量生成的 generate_state 分开，
+# 两边互不覆盖（用户可能同时点了批量生成和话题投稿）。锁仍共用 generate_lock，
+# 因为两者最终都写同一个队列，必须串行，避免丢稿。
+topic_state: dict[str, Any] = {
+    "running": False,
+    "topic": "",
+    "column": "ai_news",
+    "materials": 0,
+    "article_id": "",
+    "title": "",
+    "error": "",
+    "stage": "",
+    "started_at": "",
 }
 
 
@@ -339,6 +355,103 @@ def generate() -> Any:
 def generate_status() -> Any:
     """前端轮询：返回生成进度。页面刷新后也能重新读到当前状态。"""
     return jsonify(dict(generate_state))
+
+
+def _topic_worker(topic: str, column: str, demo: bool) -> None:
+    """话题投稿后台线程：联网搜素材 → 复用写稿链路成稿 → 入队。
+
+    全程持 generate_lock（与批量生成/优化共用），因为最终都要写同一个队列，
+    并发会丢稿。异常写回 topic_state，前端轮询能看到具体错误。
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
+    topic_state.update({
+        "running": True, "topic": topic, "column": column, "materials": 0,
+        "article_id": "", "title": "", "error": "", "stage": "正在联网搜索素材",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    try:
+        if not getattr(config, "USE_TOPIC_RESEARCH", True):
+            raise RuntimeError("话题投稿功能已在配置里关闭（USE_TOPIC_RESEARCH=0）")
+
+        # 1. 联网检索真实素材
+        researched = topic_research.research(topic)
+        if not researched["ok"]:
+            topic_state["stage"] = "没搜到素材"
+            topic_state["error"] = researched["reason"]
+            return
+        topic_state["materials"] = len(researched["materials"])
+        topic_state["stage"] = (
+            f"搜到 {len(researched['materials'])} 条素材，正在写稿"
+        )
+        print(f"[topic] 话题「{topic}」搜到 {len(researched['materials'])} 条素材", flush=True)
+
+        # 2. 复用 pipeline 的写稿链路（同一套真实性校验、结构自检、扩写）
+        item = topic_research.build_topic_item(researched, column)
+        from pipeline import make_article, cleanup_queue, save_queue
+
+        article = make_article(item, demo)
+        queue = load_queue()
+        queue.insert(0, article)
+        queue, _ = cleanup_queue(queue)
+        save_queue(queue)
+
+        topic_state["article_id"] = article["id"]
+        topic_state["title"] = article["title"]
+        topic_state["stage"] = "已完成，稿件已进待审核"
+        print(f"[topic] 成稿「{article['title']}」（{article['id']}）", flush=True)
+    except Exception as exc:  # noqa: BLE001 - 后台线程不能把服务打挂
+        topic_state["error"] = f"{type(exc).__name__}: {exc}"
+        topic_state["stage"] = "出错了"
+        print(f"[topic] 线程异常: {exc}", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        topic_state["running"] = False
+        generate_lock.release()
+
+
+@app.route("/topic/generate", methods=["POST"])
+def topic_generate() -> Any:
+    """话题投稿：用户给新闻话题，联网搜素材后写成热文入审核队列。
+
+    和 /generate 一样异步：搜素材 + 写稿要几十秒到几分钟，
+    同步请求会被 nginx 60s 超时掐断。这里秒回，前端轮询 /topic/status。
+    """
+    data = request.get_json(silent=True) or {}
+    topic = str(data.get("topic", "") or "").strip()
+    if not topic:
+        return jsonify({"ok": False, "error": "请先填话题"}), 400
+    if len(topic) > 120:
+        return jsonify({"ok": False, "error": "话题太长了（最多 120 字）"}), 400
+
+    column = str(data.get("column", "ai_news") or "ai_news").strip()
+    # github 专栏是结构化深度稿，话题投稿的素材是新闻搜索，不匹配，这里不接受
+    if column not in ("ai_news", "ai_sidebiz"):
+        column = "ai_news"
+
+    demo = not bool(config.AI_API_KEY)
+    if not generate_lock.acquire(blocking=False):
+        return jsonify({
+            "ok": False, "error": "正在生成中，请稍候", "state": dict(topic_state),
+        }), 409
+
+    threading.Thread(
+        target=_topic_worker, args=(topic, column, demo), daemon=True
+    ).start()
+    return jsonify({
+        "ok": True, "started": True, "topic": topic,
+        "column": column, "demo": demo,
+    })
+
+
+@app.route("/topic/status")
+def topic_status() -> Any:
+    """话题投稿进度轮询。"""
+    return jsonify(dict(topic_state))
 
 
 @app.route("/optimize", methods=["POST"])

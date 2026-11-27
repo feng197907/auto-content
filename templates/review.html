@@ -51,6 +51,13 @@
     /* 生成篇数：可手动填写，比固定下拉灵活（宽度给够，别被挤成数字一点点） */
     input.gen-count { width:84px; padding:9px 10px; border:1px solid var(--line);
              border-radius:8px; font-size:16px; background:#fff; min-height:42px; }
+    /* 话题投稿输入框：占满整行宽度，手机上好点、好打字 */
+    input.topic-input { flex:1; min-width:160px; padding:9px 10px;
+             border:1px solid var(--line); border-radius:8px; font-size:16px;
+             background:#fff; min-height:42px; }
+    .topic-status { font-size:13px; color:var(--muted); padding:6px 0 0; line-height:1.6; }
+    .topic-status .ok { color:var(--ok); }
+    .topic-status .err { color:var(--danger); }
 
     button { padding:9px 14px; border:1px solid var(--line); border-radius:8px;
              background:#fff; cursor:pointer; font-size:14px; min-height:42px;
@@ -489,6 +496,18 @@
         <button class="primary wide" id="genBtn" onclick="generate()">生成</button>
       </div>
       <div class="toolrow">
+        <span class="lbl">话题投稿</span>
+        <input type="text" id="topicInput" class="topic-input" maxlength="120"
+               placeholder="填自己找到的新闻话题，如：黄仁勋 英伟达 回归"
+               aria-label="新闻话题">
+        <select id="topicColumn" title="稿件归入哪个栏目">
+          <option value="ai_news">AI早报</option>
+          <option value="ai_sidebiz">AI副业</option>
+        </select>
+        <button class="ok" id="topicBtn" onclick="submitTopic()">搜素材写稿</button>
+      </div>
+      <div class="topic-status" id="topicStatus" style="display:none"></div>
+      <div class="toolrow">
         <span class="lbl">推送</span>
         <button class="ghost wide" id="notifyBtn" onclick="pushNotify()">推送待审稿到微信</button>
       </div>
@@ -890,6 +909,70 @@ async function generate() {
   } catch (e) {
     btn.disabled = false; btn.textContent = '生成';
     toast('生成失败：' + e);
+  }
+}
+
+// ---- 话题投稿：人工给话题 → 联网搜素材 → 写热文 ----
+let topicPolling = false;
+function showTopicStatus(html) {
+  const box = document.getElementById('topicStatus');
+  box.innerHTML = html;
+  box.style.display = 'block';
+}
+async function pollTopic(btn) {
+  try {
+    const res = await fetch(withPwd('/topic/status'));
+    const st = await readJson(res);
+    if (st.running) {
+      document.getElementById('topicBtn').textContent = '写稿中…';
+      showTopicStatus('🔍 ' + (st.stage || '处理中') +
+        (st.materials ? '（素材 ' + st.materials + ' 条）' : ''));
+      setTimeout(function () { pollTopic(btn); }, 2500);
+      return;
+    }
+    btn.disabled = false; btn.textContent = '搜素材写稿';
+    topicPolling = false;
+    if (st.error) {
+      showTopicStatus('<span class="err">✗ ' + st.error + '</span>');
+      toast('话题投稿失败：' + st.error);
+    } else if (st.article_id) {
+      showTopicStatus('<span class="ok">✓ 已成稿：《' + st.title + '》已进待审核，2 秒后跳转</span>');
+      toast('成稿成功，已进待审核');
+      setTimeout(function () { location.reload(); }, 2000);
+    } else {
+      showTopicStatus('（本次任务已结束）');
+    }
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '搜素材写稿';
+    topicPolling = false;
+    showTopicStatus('<span class="err">查询状态失败：' + e + '</span>');
+  }
+}
+async function submitTopic() {
+  const btn = document.getElementById('topicBtn');
+  const topic = (document.getElementById('topicInput').value || '').trim();
+  const column = document.getElementById('topicColumn').value;
+  if (!topic) { toast('请先填一个新闻话题'); return; }
+  if (topicPolling) { toast('已有话题稿在写，请稍候'); return; }
+  btn.disabled = true; btn.textContent = '搜索中…';
+  showTopicStatus('🔍 已提交话题「' + topic + '」，正在联网找素材…');
+  try {
+    const r = await api('/topic/generate', {topic: topic, column: column});
+    if (r.ok && r.started) {
+      topicPolling = true;
+      setTimeout(function () { pollTopic(btn); }, 1500);
+    } else if (r.state && r.state.running) {
+      topicPolling = true;
+      showTopicStatus('🔍 已有话题稿在写，帮你盯着进度…');
+      setTimeout(function () { pollTopic(btn); }, 1500);
+    } else {
+      btn.disabled = false; btn.textContent = '搜素材写稿';
+      showTopicStatus('<span class="err">✗ ' + (r.error || '提交失败') + '</span>');
+      toast(r.error || '提交失败');
+    }
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '搜素材写稿';
+    showTopicStatus('<span class="err">✗ 提交失败：' + e + '</span>');
   }
 }
 

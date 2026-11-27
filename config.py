@@ -1115,3 +1115,16 @@ TOUTIAO_HEADLESS = os.getenv("TOUTIAO_HEADLESS", "1") == "1"  # 服务器无头�
 # 要恢复自动存草稿：设 TOUTIAO_ENABLED=1，并把 local_login.py 导出的
 # data/toutiao_cookies.json、data/baijia_cookies.json 放到服务器 data/ 下。
 TOUTIAO_ENABLED = os.getenv("TOUTIAO_ENABLED", "0") == "1"
+
+# ---- 话题投稿：人工给话题 → 联网搜素材 → 写热文（2026-11-27 新增）----
+# 审核页「生成/推送工具」里输入自己找到的新闻话题，系统联网搜真实素材后
+# 复用同一套 AI 写稿链路成稿入队。和自动热榜互补：人把控选题，机器找素材。
+USE_TOPIC_RESEARCH = os.getenv("USE_TOPIC_RESEARCH", "1") == "1"
+# 联网检索参数：抓几条素材、单源超时（秒）、素材汇总上限（字符）、摘要最短长度
+TOPIC_SEARCH_LIMIT = int(os.getenv("TOPIC_SEARCH_LIMIT", "6"))
+TOPIC_SEARCH_TIMEOUT = int(os.getenv("TOPIC_SEARCH_TIMEOUT", "12"))
+TOPIC_MAX_MATERIAL_CHARS = int(os.getenv("TOPIC_MAX_MATERIAL_CHARS", "2200"))
+TOPIC_MIN_DESC = int(os.getenv("TOPIC_MIN_DESC", "12"))
+# 搜狗微信 2026-11-24 起实测断供（200 空正文），默认关闭；哪天恢复可设 1
+TOPIC_USE_SOGOU = os.getenv("TOPIC_USE_SOGOU", "0") == "1"
+
